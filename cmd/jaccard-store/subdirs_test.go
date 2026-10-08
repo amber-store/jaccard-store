@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/amber-store/core/key"
 )
 
 // parentOf makes a directory that holds a directory of each of these names,
@@ -276,4 +278,153 @@ func TestAnInterruptedPushSubdirsBeginsNoMore(t *testing.T) {
 			t.Errorf("standard error lacks %q:\n%s", want, shown)
 		}
 	}
+}
+
+// holding is a server that has references of these names already, each
+// pointing at a root of its own that no directory of a test comes to.
+func holding(names ...string) *memory {
+	m := newMemory()
+	for i, name := range names {
+		m.refs[name] = key.Key{0xEE, byte(i + 1)}
+	}
+	return m
+}
+
+func TestPushSubdirsSkipsWhatTheServerHas(t *testing.T) {
+	dir, temp := parentOf(t, "alpha", "beta", "gamma"), t.TempDir()
+	// The reference of one directory, and what is none: another reference
+	// under the prefix, and references named as directories are but not
+	// under it.
+	m := holding("proj/beta", "proj/other", "beta", "gamma")
+	had := m.refs["proj/beta"]
+	out, shown, err := against(t, m, "push-subdirs", "--prefix", "proj/", "--skip-existing", "--temp-dir", temp, dir)
+	if err != nil {
+		t.Fatalf("push-subdirs: %v\n%s", err, shown)
+	}
+	if got := pushedTo(m); got != "beta gamma proj/alpha proj/beta proj/gamma proj/other" {
+		t.Fatalf("the server holds %q", got)
+	}
+	// The directory whose reference was there was not read, let alone
+	// pushed, and the reference is as it was.
+	if m.refs["proj/beta"] != had || len(m.stores) != 2 {
+		t.Fatalf("proj/beta points at %s, was %s; %d directories were pushed", m.refs["proj/beta"], had, len(m.stores))
+	}
+	// The server was asked once, for the names that begin as these do.
+	if !slices.Equal(m.listed, []string{"proj/"}) {
+		t.Fatalf("the server was asked to list %q", m.listed)
+	}
+	// Every directory has its line, in their order.
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("standard output:\n%s", out)
+	}
+	for i, want := range []string{
+		"proj/alpha " + m.refs["proj/alpha"].String() + ": base pack, ",
+		"proj/beta " + had.String() + ": the server has the reference already, not pushed",
+		"proj/gamma " + m.refs["proj/gamma"].String() + ": base pack, ",
+	} {
+		if !strings.HasPrefix(lines[i], want) {
+			t.Errorf("line %d is %q, want it to begin with %q", i, lines[i], want)
+		}
+	}
+	empty(t, temp)
+	for _, want := range []string{
+		"listing the server's references: 1 of 3 directories there already (",
+		"alpha: base pack, 4.00 KiB (",
+		"gamma: base pack, 4.00 KiB (",
+		"2 directories: 2 pushed (",
+	} {
+		if !strings.Contains(shown, want) {
+			t.Errorf("standard error lacks %q:\n%s", want, shown)
+		}
+	}
+	if strings.Contains(shown, "beta") {
+		t.Errorf("standard error speaks of the directory that was left out:\n%s", shown)
+	}
+
+	// Without the option nothing is asked, and the directory is pushed
+	// over what was there.
+	if _, _, err := against(t, m, "push-subdirs", "--prefix", "proj/", dir); err != nil {
+		t.Fatal(err)
+	}
+	if m.refs["proj/beta"] == had || len(m.listed) != 1 || len(m.stores) != 5 {
+		t.Fatalf("without --skip-existing: proj/beta points at %s, listed %q, %d pushes in all", m.refs["proj/beta"], m.listed, len(m.stores))
+	}
+}
+
+func TestPushSubdirsWithNothingLeftToPush(t *testing.T) {
+	dir, m := parentOf(t, "a", "b"), holding("p/a", "p/b")
+	out, shown, err := against(t, m, "push-subdirs", "--prefix", "p/", "--skip-existing", dir)
+	if err != nil {
+		t.Fatalf("push-subdirs: %v\n%s", err, shown)
+	}
+	want := "p/a " + m.refs["p/a"].String() + ": the server has the reference already, not pushed\n" +
+		"p/b " + m.refs["p/b"].String() + ": the server has the reference already, not pushed\n"
+	if out != want || len(m.stores) != 0 {
+		t.Fatalf("%d directories were pushed; standard output:\n%s", len(m.stores), out)
+	}
+	if !strings.Contains(shown, "listing the server's references: 2 of 2 directories there already (") ||
+		!strings.Contains(shown, "done in ") || strings.Contains(shown, "pushed (") {
+		t.Errorf("standard error:\n%s", shown)
+	}
+
+	// Shown or not, it comes to the same,
+	out, shown, err = against(t, m, "push-subdirs", "--prefix", "p/", "--skip-existing", "--no-progress", dir)
+	if err != nil || out != want || shown != "" {
+		t.Fatalf("--no-progress: %v, standard output:\n%s\nstandard error:\n%s", err, out, shown)
+	}
+	// and the variable will do for the option.
+	out, _, err = under(t, context.Background(), map[string]string{"JACCARD_SKIP_EXISTING": "true"}, m, "push-subdirs", "--prefix", "p/", dir)
+	if err != nil || out != want || len(m.stores) != 0 {
+		t.Fatalf("by the variable: %v, %d directories were pushed; standard output:\n%s", err, len(m.stores), out)
+	}
+	// A prefix of nothing asks for every reference.
+	m = holding("a")
+	if _, _, err = against(t, m, "push-subdirs", "--prefix", "", "--skip-existing", dir); err != nil {
+		t.Fatal(err)
+	}
+	if got := pushedTo(m); got != "a b" || len(m.stores) != 1 || !slices.Equal(m.listed, []string{""}) {
+		t.Fatalf("with a prefix of nothing: the server holds %q after %d pushes, listed %q", got, len(m.stores), m.listed)
+	}
+}
+
+// Which references are there cannot be guessed: when the server does not
+// say, nothing is pushed.
+func TestPushSubdirsThatCannotAskPushesNothing(t *testing.T) {
+	dir, m := parentOf(t, "a", "b"), newMemory()
+	m.listErr = errors.New("the server is away")
+	out, shown, err := against(t, m, "push-subdirs", "--prefix", "p/", "--skip-existing", dir)
+	if err == nil || err.Error() != "listing the references the server has: the server is away" {
+		t.Fatalf("push-subdirs = %v", err)
+	}
+	if out != "" || len(m.stores) != 0 || pushedTo(m) != "" {
+		t.Fatalf("%d directories were pushed; standard output:\n%s", len(m.stores), out)
+	}
+	if !strings.Contains(shown, "listing the server's references: failed after ") {
+		t.Errorf("standard error:\n%s", shown)
+	}
+}
+
+// What fails is counted among what there was to push.
+func TestPushSubdirsThatSkipsStillFailsForWhatFails(t *testing.T) {
+	dir, temp, m := parentOf(t, "a", "b", "c", "d"), t.TempDir(), holding("p/a", "p/d")
+	m.refused = map[string]error{"p/b": errors.New("the bucket answered 403")}
+	out, shown, err := against(t, m, "push-subdirs", "--prefix", "p/", "--skip-existing", "--temp-dir", temp, dir)
+	if err == nil || err.Error() != "1 of 2 directories were not pushed" {
+		t.Fatalf("push-subdirs = %v\n%s", err, shown)
+	}
+	if lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n"); len(lines) != 3 ||
+		!strings.HasSuffix(lines[0], "not pushed") || !strings.HasPrefix(lines[1], "p/c ") || !strings.HasSuffix(lines[2], "not pushed") {
+		t.Errorf("standard output:\n%s", out)
+	}
+	for _, want := range []string{
+		"2 of 4 directories there already (",
+		"2 directories: 1 pushed, 1 failed (",
+		"not pushed:\n  b: the bucket answered 403\n",
+	} {
+		if !strings.Contains(shown, want) {
+			t.Errorf("standard error lacks %q:\n%s", want, shown)
+		}
+	}
+	empty(t, temp)
 }

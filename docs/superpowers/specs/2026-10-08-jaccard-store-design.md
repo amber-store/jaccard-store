@@ -691,7 +691,7 @@ jaccard-store --store DIR --server ENDPOINT_ID [--key FILE] COMMAND
   pull [--as REF] [--no-progress] NAME
   push-dir [--min-dedup 0.5] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR NAME
   pull-dir [--temp-dir DIR] [--no-progress] NAME DIR
-  push-subdirs --prefix PREFIX [--jobs 5] [--min-dedup 0.5] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR
+  push-subdirs --prefix PREFIX [--jobs 5] [--skip-existing] [--min-dedup 0.5] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR
   ls [PATTERN...]
   rm PATTERN...
 ```
@@ -713,6 +713,7 @@ wins when both are set.
 | `--temp-dir DIR` on push-dir, pull-dir and push-subdirs | `JACCARD_TEMP_DIR` | the system's temporary directory |
 | `push-subdirs --prefix PREFIX` | `JACCARD_PREFIX` | required |
 | `push-subdirs --jobs N`, `-j N` | `JACCARD_JOBS` | `5` |
+| `push-subdirs --skip-existing` | `JACCARD_SKIP_EXISTING` | every directory is pushed |
 | `--no-progress` on push, pull, push-dir, pull-dir and push-subdirs | `JACCARD_NO_PROGRESS` | progress is shown |
 
 `--as` has no variable: it names the one ref of one invocation. `AMBER_STORE`
@@ -886,6 +887,21 @@ cannot be patch packs of one another: the server offers the base packs it
 has, and one that is still being uploaded is not among them. One at a
 time, each can lean on those before it.
 
+**What is there already.** With `--skip-existing` the command lists the
+server's references that begin with the prefix, once, after connecting and
+before anything is read, and leaves out every directory whose reference is
+among them. Such a directory is not imported and nothing is asked of the
+server for it, which is the point: a run over many directories that was
+cut short is taken up where it stopped. Only the name decides. What the
+reference points at is not compared with the directory, since that would
+take the import that is being saved: a directory that has changed since
+it was pushed is not pushed again. A listing that fails ends the command
+before anything is pushed. A directory left out has its line on standard
+output among those that were pushed, in the order of the directories, with
+the root the server has for it; it is none of the directories the counts
+and the failures are of; and when every directory is there the command
+has nothing to do and succeeds.
+
 **Failures.** A directory whose push fails, for whatever reason (its name
 makes no reference name, it cannot be read, the upload is refused), does
 not stop the others: every directory is tried. When all are through the
@@ -990,7 +1006,11 @@ Tests are written before the code they cover.
   what is pushed in memory and gives it back. Of `push-subdirs`: which
   directories are taken, their names, that as many run at once as `--jobs`
   says and no more, that the others are pushed when some fail and the
-  failures are named, and that an interrupt begins no more. Its board is
+  failures are named, and that an interrupt begins no more. Of
+  `--skip-existing`: that a directory whose reference is there is neither
+  read nor pushed and its reference left as it was, that only names under
+  the prefix count, a run with nothing left to push, a listing that fails,
+  and failures counted among what there was to push. Its board is
   held against what a terminal would show of what it writes. Covered there: a directory with files
   large and empty, an executable, nested and empty directories and a
   symbolic link comes back as it went; the temporary store is gone after a
