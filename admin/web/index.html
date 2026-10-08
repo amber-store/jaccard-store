@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jaccard-store</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a class="brand" href="#/">jaccard-store</a>
+  <nav>
+    <a href="#/" data-view="overview">Overview</a>
+    <a href="#/refs" data-view="refs">Refs</a>
+    <a href="#/packs" data-view="packs">Packs</a>
+    <a href="#/uploads" data-view="uploads">Uploads</a>
+  </nav>
+  <button id="refresh" type="button" title="Read the figures again">Refresh</button>
+</header>
+<main id="view" aria-live="polite"></main>
+<noscript><p class="notice">This page needs JavaScript to read the store's figures.</p></noscript>
+<script src="app.js"></script>
+</body>
+</html>
