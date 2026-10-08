@@ -559,6 +559,7 @@ jaccard-store --store DIR --server ENDPOINT_ID [--key FILE] COMMAND
   pull [--as REF] [--no-progress] NAME
   push-dir [--min-dedup 0.5] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR NAME
   pull-dir [--temp-dir DIR] [--no-progress] NAME DIR
+  push-subdirs --prefix PREFIX [--jobs 5] [--min-dedup 0.5] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR
   ls [PATTERN...]
   rm PATTERN...
 ```
@@ -575,10 +576,12 @@ wins when both are set.
 | `--store DIR` | `JACCARD_STORE`, then `AMBER_STORE` | required for push and pull |
 | `--server ENDPOINT_ID` | `JACCARD_SERVER` | required |
 | `--key FILE` | `JACCARD_KEY` | `jaccard-store/client.key` in the user's configuration directory, created on first use |
-| `push --min-dedup F`, `push-dir --min-dedup F` | `JACCARD_MIN_DEDUP` | `0.5` |
-| `push-dir --no-ignore` | `JACCARD_NO_IGNORE` | `.amberignore` files are honored |
-| `push-dir --temp-dir DIR`, `pull-dir --temp-dir DIR` | `JACCARD_TEMP_DIR` | the system's temporary directory |
-| `--no-progress` on push, pull, push-dir and pull-dir | `JACCARD_NO_PROGRESS` | progress is shown |
+| `--min-dedup F` on push, push-dir and push-subdirs | `JACCARD_MIN_DEDUP` | `0.5` |
+| `--no-ignore` on push-dir and push-subdirs | `JACCARD_NO_IGNORE` | `.amberignore` files are honored |
+| `--temp-dir DIR` on push-dir, pull-dir and push-subdirs | `JACCARD_TEMP_DIR` | the system's temporary directory |
+| `push-subdirs --prefix PREFIX` | `JACCARD_PREFIX` | required |
+| `push-subdirs --jobs N`, `-j N` | `JACCARD_JOBS` | `5` |
+| `--no-progress` on push, pull, push-dir, pull-dir and push-subdirs | `JACCARD_NO_PROGRESS` | progress is shown |
 
 `--as` has no variable: it names the one ref of one invocation. `AMBER_STORE`
 is read as well because it is what core's own CLI uses for the same
@@ -720,6 +723,64 @@ and the pull:
 When a step fails, its line is marked and stays, and cleaning up follows as
 a step of its own; no total is shown.
 
+### 9.6 Every directory in a directory
+
+`push-subdirs --prefix PREFIX DIR` is `push-dir` for each directory in DIR.
+Like `push-dir` it is the command's own: the client package and the
+protocol know nothing of it.
+
+**Which directories.** Those of the first level of DIR that an import of
+DIR itself would take in: every directory, one whose name begins with a
+dot included, but for those the `.amberignore` of DIR names, unless
+`--no-ignore`. Files and symbolic links are left out, whatever a link
+points at. A directory further down is not a reference of its own: it goes
+with the directory of the first level it is in. A DIR that holds no
+directory is an error, being more likely the wrong DIR than a wish to push
+nothing.
+
+**Their names.** A directory becomes the reference `PREFIX` + its name, the
+prefix put before the name as it is, with no separator added. `--prefix`
+has to be given: without it the references would be named as the
+directories are and nothing else, among whatever else the server holds,
+and that should be meant when it happens. It can be, with `--prefix ''`. A
+prefix that no name can begin with is refused before the server is dialed.
+
+**The pushes.** One connection serves all of them; every request is a
+stream of its own on it. `--jobs` directories (5 by default) are pushed at
+a time, in the order of their names, each through a temporary store of its
+own that is removed when its push is over, so no more than `--jobs` of them
+are on the disk together. Directories that are pushed at the same time
+cannot be patch packs of one another: the server offers the base packs it
+has, and one that is still being uploaded is not among them. One at a
+time, each can lean on those before it.
+
+**Failures.** A directory whose push fails, for whatever reason (its name
+makes no reference name, it cannot be read, the upload is refused), does
+not stop the others: every directory is tried. When all are through the
+command writes to standard output what was pushed, as `push-dir` writes it
+of one directory, by name; to standard error the directories that were not
+pushed, each with all of its error, with `--no-progress` as without; and it
+fails, so that its exit status is not zero, when at least one was not
+pushed. An interrupt lets the pushes that are under way fail with it and
+begins no more; the command then says how many were pushed, failed and
+never begun.
+
+**What is shown.** Several things are done at once, so the one line of
+section 9.4 will not do. Connecting is shown as there. Then, on a terminal,
+every directory that is being pushed has a row: its name, the time since
+its push began, the first word of the step it is in (what is being done),
+and the figures that step has in section 9.4. Under the rows a line counts
+the directories: how many are pushed, failed and running, as a bar and in
+figures, and the time left for the rest at the pace of those that are
+done. A directory that is done leaves a line above the rows, with the time
+it took and what came of it, or that it failed and the beginning of why.
+The rows and the count are redrawn in place ten times a second; no line is
+wider than the terminal and no more rows are drawn than it is high, since
+a drawing that wraps or scrolls cannot be drawn over. At the end the count
+of what became of the directories takes the place of the rows. Off a
+terminal a directory is a plain line when it is done, the count gets one
+every five seconds, and one at the end.
+
 ## 10. Layout
 
 ```
@@ -776,8 +837,12 @@ Tests are written before the code they cover.
   pattern, a star across slashes, several arguments, one that matches
   nothing, one that is no pattern, that `ls` lists what `rm` removes, a
   reference gone meanwhile, a removal that fails),
-  and `push-dir` and `pull-dir` against one that keeps what is
-  pushed in memory and gives it back. Covered there: a directory with files
+  and `push-dir`, `pull-dir` and `push-subdirs` against one that keeps
+  what is pushed in memory and gives it back. Of `push-subdirs`: which
+  directories are taken, their names, that as many run at once as `--jobs`
+  says and no more, that the others are pushed when some fail and the
+  failures are named, and that an interrupt begins no more. Its board is
+  held against what a terminal would show of what it writes. Covered there: a directory with files
   large and empty, an executable, nested and empty directories and a
   symbolic link comes back as it went; the temporary store is gone after a
   success, a failed push and a refused pull; a destination that is taken

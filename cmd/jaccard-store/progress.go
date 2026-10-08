@@ -71,26 +71,52 @@ const (
 	// rateWindow is the stretch of time the rate is taken over: long
 	// enough to be steady, short enough to follow a transfer that slows.
 	rateWindow = 10 * time.Second
-	// fallbackWidth is taken for a terminal that does not tell its own.
-	fallbackWidth = 80
+	// fallbackWidth and fallbackHeight are taken for a terminal that does
+	// not tell its own.
+	fallbackWidth  = 80
+	fallbackHeight = 24
 )
+
+// reporter is what a command tells its steps to: the progress of a command
+// that does one thing after the other, or a row of a board, which is one
+// of several things done at once.
+type reporter interface {
+	client.Progress
+	// Fail marks the running step as the one err came in.
+	Fail(err error)
+}
+
+// terminal reports whether out is a terminal that can be drawn on, and if
+// so whether in colour, and returns how to ask for its size.
+func terminal(out io.Writer) (size func() (width, height int), colour, ok bool) {
+	f, isFile := out.(*os.File)
+	if !isFile || !term.IsTerminal(int(f.Fd())) || os.Getenv("TERM") == "dumb" {
+		return nil, false, false
+	}
+	size = func() (int, int) {
+		w, h, err := term.GetSize(int(f.Fd()))
+		if err != nil || w <= 0 || h <= 0 {
+			return fallbackWidth, fallbackHeight
+		}
+		return w, h
+	}
+	return size, os.Getenv("NO_COLOR") == "", true
+}
 
 // newProgress returns the progress of a command that writes to out. With
 // quiet it shows nothing.
 func newProgress(out io.Writer, quiet bool) *progress {
 	p := &progress{out: out, quiet: quiet, now: time.Now, every: time.Second, width: func() int { return 0 }}
-	f, ok := out.(*os.File)
-	if !ok || quiet || !term.IsTerminal(int(f.Fd())) || os.Getenv("TERM") == "dumb" {
+	if quiet {
 		return p
 	}
-	p.live = true
-	p.every = liveEvery
-	p.color = os.Getenv("NO_COLOR") == ""
+	size, colour, ok := terminal(out)
+	if !ok {
+		return p
+	}
+	p.live, p.every, p.color = true, liveEvery, colour
 	p.width = func() int {
-		w, _, err := term.GetSize(int(f.Fd()))
-		if err != nil || w <= 0 {
-			return fallbackWidth
-		}
+		w, _ := size()
 		return w
 	}
 	return p
@@ -181,13 +207,21 @@ func (p *progress) fail(err error) {
 	fmt.Fprintf(p.out, "%s: %s after %s\n", s.name, how, human.Duration(took))
 }
 
-// Close ends the show. err is how the command went: with an error the step
-// that was running is marked as the one that failed, and without one the
-// time of all steps together is added. Nothing is shown after Close.
-func (p *progress) Close(err error) {
+// Stop ends the show without a word: no total follows. It is for a command
+// that goes on to show what it does some other way.
+func (p *progress) Stop() {
 	if p.quiet {
 		return
 	}
+	p.halt()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.drop()
+	p.began = time.Time{}
+}
+
+// halt ends the drawing. Nothing is shown from here on.
+func (p *progress) halt() {
 	p.mu.Lock()
 	stop, stopped := p.stop, p.stopped
 	p.stop, p.closed = nil, true
@@ -196,19 +230,36 @@ func (p *progress) Close(err error) {
 		close(stop)
 		<-stopped
 	}
+}
 
+// drop takes the line of a step nobody ended off the terminal. p.mu is
+// held.
+func (p *progress) drop() {
+	if p.step == nil {
+		return
+	}
+	p.step = nil
+	if p.live {
+		fmt.Fprint(p.out, "\r\033[K")
+	}
+}
+
+// Close ends the show. err is how the command went: with an error the step
+// that was running is marked as the one that failed, and without one the
+// time of all steps together is added. Nothing is shown after Close.
+func (p *progress) Close(err error) {
+	if p.quiet {
+		return
+	}
+	p.halt()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
-	switch {
-	case err != nil:
+	if err != nil {
 		p.fail(err)
-	case p.step != nil:
+	} else {
 		// A step nobody ended, of a command that went well: its line goes.
-		p.step = nil
-		if p.live {
-			fmt.Fprint(p.out, "\r\033[K")
-		}
+		p.drop()
 	}
 	if err == nil && !p.began.IsZero() {
 		if total := now.Sub(p.began); p.live {
@@ -404,6 +455,12 @@ func doneLine(mark, name string, took time.Duration, summary string) string {
 // a terminal that wraps it could not have it redrawn.
 func liveLine(v view, frame, width int) string {
 	line := lead(string(spinner[frame%len(spinner)]), v.name, human.Seconds(v.elapsed))
+	return strings.TrimRight(clip(withFigures(line, v, width), width-1), " ")
+}
+
+// withFigures returns line with the figures of a step after it, as many of
+// them as a terminal width columns wide has room for.
+func withFigures(line string, v view, width int) string {
 	switch {
 	case v.known():
 		// The rate of a transfer is all but always below "1000.00 MiB/s",
@@ -433,7 +490,7 @@ func liveLine(v view, frame, width int) string {
 	case v.unit != client.NoUnit:
 		line += "  " + v.amount() + "  " + v.speed()
 	}
-	return strings.TrimRight(clip(line, width-1), " ")
+	return line
 }
 
 // plainLine is the line of the running step where there is no terminal.

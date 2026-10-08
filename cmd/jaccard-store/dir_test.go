@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/amber-store/core/fstree"
 	"github.com/amber-store/core/key"
@@ -19,9 +23,22 @@ import (
 // memory is a server that keeps what is pushed to it and gives it back: a
 // reference and the objects under it.
 type memory struct {
+	// Pushes come side by side from push-subdirs.
+	mu      sync.Mutex
 	objects map[key.Key][]byte
 	refs    map[string]key.Key
 	pushErr error
+	// refused is what the push of a name fails with, for the names in it.
+	refused map[string]error
+	// onPush, when set, is called as a push begins.
+	onPush func()
+	// atOnce, when set, holds every push until that many are under way
+	// together: it is how a test sees how many run side by side.
+	atOnce   int
+	together chan struct{} // closed once atOnce pushes were under way
+	gather   sync.Once
+	inFlight atomic.Int32
+	peak     atomic.Int32
 
 	connected int
 	stores    []string // the directories of the stores it was handed
@@ -30,15 +47,41 @@ type memory struct {
 }
 
 func newMemory() *memory {
-	return &memory{objects: map[key.Key][]byte{}, refs: map[string]key.Key{}}
+	return &memory{objects: map[key.Key][]byte{}, refs: map[string]key.Key{}, together: make(chan struct{})}
 }
 
-func (m *memory) Push(_ context.Context, store *localStore, name string, root key.Key, opts client.PushOptions) (client.PushResult, error) {
-	m.stores, m.packDirs = append(m.stores, store.dir), append(m.packDirs, opts.TempDir)
+func (m *memory) Push(ctx context.Context, store *localStore, name string, root key.Key, opts client.PushOptions) (client.PushResult, error) {
+	n := m.inFlight.Add(1)
+	defer m.inFlight.Add(-1)
+	for {
+		peak := m.peak.Load()
+		if n <= peak || m.peak.CompareAndSwap(peak, n) {
+			break
+		}
+	}
+	if m.atOnce > 0 {
+		if int(n) >= m.atOnce {
+			m.gather.Do(func() { close(m.together) })
+		}
+		select {
+		case <-m.together:
+		case <-time.After(10 * time.Second):
+			return client.PushResult{}, fmt.Errorf("%d pushes never were under way together", m.atOnce)
+		}
+	}
+	if m.onPush != nil {
+		m.onPush()
+	}
+	if err := ctx.Err(); err != nil {
+		return client.PushResult{}, err
+	}
 	keys, err := fstree.ReachableKeys(root, store.objects.Get)
 	if err != nil {
 		return client.PushResult{}, err
 	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stores, m.packDirs = append(m.stores, store.dir), append(m.packDirs, opts.TempDir)
 	p := opts.Progress
 	p.Begin("uploading", uint64(len(keys)), client.Objects)
 	for _, k := range keys {
@@ -52,12 +95,17 @@ func (m *memory) Push(_ context.Context, store *localStore, name string, root ke
 	if m.pushErr != nil {
 		return client.PushResult{}, m.pushErr
 	}
+	if err := m.refused[name]; err != nil {
+		return client.PushResult{}, err
+	}
 	p.End("")
 	m.refs[name] = root
 	return client.PushResult{Root: root, Objects: uint64(len(keys)), DataSize: 4096}, nil
 }
 
 func (m *memory) Pull(_ context.Context, store *localStore, name string, opts client.PullOptions) (client.PullResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.stores = append(m.stores, store.dir)
 	p := opts.Progress
 	p.Begin("looking up the reference", 0, client.NoUnit)
@@ -92,16 +140,25 @@ func (m *memory) Close() error                                       { return ni
 // to standard output and to standard error.
 func against(t *testing.T, m *memory, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
-	for _, name := range append(variables, "JACCARD_NO_IGNORE", "JACCARD_TEMP_DIR") {
+	return under(t, context.Background(), nil, m, args...)
+}
+
+// under is against with a context to run under and variables to run with.
+func under(t *testing.T, ctx context.Context, env map[string]string, m *memory, args ...string) (stdout, stderr string, err error) {
+	t.Helper()
+	for _, name := range append(variables, "JACCARD_NO_IGNORE", "JACCARD_TEMP_DIR", "JACCARD_PREFIX", "JACCARD_JOBS") {
 		t.Setenv(name, "")
 		os.Unsetenv(name)
+	}
+	for name, value := range env {
+		t.Setenv(name, value)
 	}
 	var out, errOut bytes.Buffer
 	app := newApp(&out, &errOut, func(context.Context, settings) (remote, error) {
 		m.connected++
 		return m, nil
 	})
-	err = app.Run(append([]string{"jaccard-store"}, args...))
+	err = app.RunContext(ctx, append([]string{"jaccard-store"}, args...))
 	return out.String(), errOut.String(), err
 }
 
