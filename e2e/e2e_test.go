@@ -101,10 +101,13 @@ type world struct {
 
 func newWorld(t *testing.T, s3 backend, mutate func(*server.Config)) *world {
 	t.Helper()
+	// The bucket first: the first test to ask for one in a container waits
+	// for the image to be pulled, which is not the test's time to lose.
+	b := s3.bucket(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	t.Cleanup(cancel)
 	dir := t.TempDir()
-	w := &world{t: t, ctx: ctx, bucket: s3.bucket(t), clock: &clock{t: time.Unix(1_800_000_000, 0)}}
+	w := &world{t: t, ctx: ctx, bucket: b, clock: &clock{t: time.Unix(1_800_000_000, 0)}}
 
 	var err error
 	if w.db, err = db.Open(filepath.Join(dir, "store.sqlite")); err != nil {

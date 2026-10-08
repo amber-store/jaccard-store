@@ -182,6 +182,13 @@ MinIO is not run by default because its own images have left the public
 registries, so there is none to pin. A build by somebody else works, for
 example `JACCARD_TEST_MINIO_IMAGE=cgr.dev/chainguard/minio:latest`.
 
+### Continuous integration
+
+`.github/workflows/test.yml` runs on every push and pull request: `gofmt`,
+`go vet`, `sqlc diff` (the generated queries are what the SQL says), the
+tests, and the tests again under the race detector. The runner has Docker,
+so the container tests run there too.
+
 ## License
 
 Licensed under the GNU Lesser General Public License, version 3 only

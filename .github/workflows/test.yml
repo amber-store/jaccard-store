@@ -1,0 +1,31 @@
+name: Test
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: sqlc-dev/setup-sqlc@v4
+        with:
+          sqlc-version: '1.31.1'
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - name: sqlc diff
+        run: sqlc diff
+      # The end-to-end tests start RustFS in a container, through the
+      # runner's Docker, and run every scenario against it as well as
+      # against the S3 in memory.
+      - name: tests
+        run: go test -timeout 20m ./...
+      - name: tests with the race detector
+        run: go test -race -timeout 20m ./...
