@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +30,10 @@ type memory struct {
 	objects map[key.Key][]byte
 	refs    map[string]key.Key
 	pushErr error
+	// listErr is what List fails with; listed are the prefixes it was
+	// asked for.
+	listErr error
+	listed  []string
 	// refused is what the push of a name fails with, for the names in it.
 	refused map[string]error
 	// onPush, when set, is called as a push begins.
@@ -132,9 +138,25 @@ func (m *memory) Pull(_ context.Context, store *localStore, name string, opts cl
 	return client.PullResult{Root: root, Packs: 1, Objects: len(keys)}, nil
 }
 
-func (m *memory) List(context.Context, string) ([]client.Ref, error) { return nil, nil }
-func (m *memory) Delete(context.Context, string) error               { return nil }
-func (m *memory) Close() error                                       { return nil }
+func (m *memory) List(_ context.Context, prefix string) ([]client.Ref, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.listed = append(m.listed, prefix)
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	var refs []client.Ref
+	for name, root := range m.refs {
+		if strings.HasPrefix(name, prefix) {
+			refs = append(refs, client.Ref{Name: name, Root: root})
+		}
+	}
+	slices.SortFunc(refs, func(a, b client.Ref) int { return cmp.Compare(a.Name, b.Name) })
+	return refs, nil
+}
+
+func (m *memory) Delete(context.Context, string) error { return nil }
+func (m *memory) Close() error                         { return nil }
 
 // against runs the command with args against m and returns what it wrote
 // to standard output and to standard error.
@@ -146,7 +168,7 @@ func against(t *testing.T, m *memory, args ...string) (stdout, stderr string, er
 // under is against with a context to run under and variables to run with.
 func under(t *testing.T, ctx context.Context, env map[string]string, m *memory, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
-	for _, name := range append(variables, "JACCARD_NO_IGNORE", "JACCARD_TEMP_DIR", "JACCARD_PREFIX", "JACCARD_JOBS") {
+	for _, name := range append(variables, "JACCARD_NO_IGNORE", "JACCARD_TEMP_DIR", "JACCARD_PREFIX", "JACCARD_JOBS", "JACCARD_SKIP_EXISTING") {
 		t.Setenv(name, "")
 		os.Unsetenv(name)
 	}

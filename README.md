@@ -277,6 +277,12 @@ jaccard-store push-subdirs --prefix projects/ ./checkouts
   command then lists the ones that were not pushed, each with its error,
   and exits with a status that is not zero. What was pushed is printed as
   `push-dir` prints it, by name.
+- `--skip-existing` leaves out the directories whose references the server
+  has already. The server is asked once, before anything is read, so a run
+  that was cut short is taken up where it stopped. Only the name is looked
+  at: a directory that has changed since it was pushed is not pushed
+  again. Each directory left out has a line in the output too, with the
+  root the server has for it.
 
 Options come before the arguments, as with core's CLI.
 
@@ -290,6 +296,7 @@ Options come before the arguments, as with core's CLI.
 | `--temp-dir DIR` on push-dir, pull-dir and push-subdirs | `JACCARD_TEMP_DIR` | the system's temporary directory |
 | `push-subdirs --prefix PREFIX` | `JACCARD_PREFIX` | required |
 | `push-subdirs --jobs N`, `-j N` | `JACCARD_JOBS` | `5` |
+| `push-subdirs --skip-existing` | `JACCARD_SKIP_EXISTING` | every directory is pushed |
 | `--no-progress` on push, pull, push-dir, pull-dir and push-subdirs | `JACCARD_NO_PROGRESS` | progress is shown |
 
 The key file is created on first use. Its endpoint ID is what the server

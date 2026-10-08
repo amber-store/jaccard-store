@@ -178,6 +178,9 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 							"so it wants its own / at the end (required)"},
 					&cli.IntFlag{Name: "jobs", Aliases: []string{"j"}, EnvVars: []string{"JACCARD_JOBS"}, Value: 5,
 						Usage: "`NUMBER` of directories pushed at once"},
+					&cli.BoolFlag{Name: "skip-existing", EnvVars: []string{"JACCARD_SKIP_EXISTING"},
+						Usage: "leave out every directory whose reference the server has already, whatever that points at: " +
+							"such a directory is not read, so one that has changed since it was pushed is not pushed again"},
 					minDedup(),
 					noIgnore(),
 					tempDir(),

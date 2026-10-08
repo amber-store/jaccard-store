@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -20,6 +21,10 @@ import (
 // directory's name. Several are pushed at once. One that fails does not
 // stop the others: they are all tried, and the command says at its end
 // which were not pushed, and fails if any was not.
+//
+// With --skip-existing the server is first asked which of the references
+// it has, and the directories of those are left alone: a run that was cut
+// short is taken up where it stopped, without reading again what is there.
 
 // subdir is one directory push-subdirs has to push, and what came of it.
 type subdir struct {
@@ -29,6 +34,10 @@ type subdir struct {
 	res  client.PushResult
 	err  error
 	done bool // its push was begun, and is over
+	// there says that the server had the reference before anything was
+	// pushed and that the directory is left out for it; root is then what
+	// the server's reference points at, not what the directory comes to.
+	there bool
 }
 
 func runPushSubdirs(c *cli.Context, connect dialer) error {
@@ -79,12 +88,48 @@ func runPushSubdirs(c *cli.Context, connect dialer) error {
 		return err
 	}
 	defer server.Close()
+	todo := len(dirs)
+	if c.Bool("skip-existing") {
+		// Asked once, before anything is read: the names all begin with the
+		// prefix, so one listing has every reference that could be one of
+		// them.
+		show.Begin("listing the server's references", 0, client.NoUnit)
+		listed, err := server.List(c.Context, prefix)
+		if err != nil {
+			err = fmt.Errorf("listing the references the server has: %w", err)
+			show.Close(err)
+			return err
+		}
+		has := make(map[string]key.Key, len(listed))
+		for _, r := range listed {
+			has[r.Name] = r.Root
+		}
+		for i := range dirs {
+			if root, ok := has[dirs[i].ref]; ok {
+				dirs[i].root, dirs[i].there = root, true
+				todo--
+			}
+		}
+		show.End(fmt.Sprintf("%s of %s there already", human.Count(uint64(len(dirs)-todo)), directories(len(dirs))))
+	}
+	if todo == 0 {
+		// Nothing is left to push, and that is not a failure.
+		show.Close(nil)
+		for _, d := range dirs {
+			printThere(c.App.Writer, d.ref, d.root)
+		}
+		return nil
+	}
 	show.Stop()
 
-	b := newBoard(c.App.ErrWriter, quiet, len(dirs))
+	b := newBoard(c.App.ErrWriter, quiet, todo)
 	var running sync.WaitGroup
 	free := make(chan struct{}, jobs)
 	for i := range dirs {
+		d := &dirs[i]
+		if d.there {
+			continue
+		}
 		// A directory waits here for one of the jobs to be free. One that
 		// is still waiting when the command is interrupted is not begun.
 		select {
@@ -94,7 +139,6 @@ func runPushSubdirs(c *cli.Context, connect dialer) error {
 		if c.Context.Err() != nil {
 			break
 		}
-		d := &dirs[i]
 		running.Go(func() {
 			defer func() { <-free }()
 			r := b.add(d.name)
@@ -105,20 +149,26 @@ func runPushSubdirs(c *cli.Context, connect dialer) error {
 	}
 	running.Wait()
 
-	var failed, skipped []subdir
+	var failed, waiting []subdir
 	for _, d := range dirs {
 		switch {
+		case d.there:
 		case !d.done:
-			skipped = append(skipped, d)
+			waiting = append(waiting, d)
 		case d.err != nil:
 			failed = append(failed, d)
 		}
 	}
-	b.Close(len(skipped))
+	b.Close(len(waiting))
 
-	// What was pushed, to standard output, as push-dir says it of one.
+	// What was pushed, to standard output, as push-dir says it of one, and
+	// among it, in the order of the directories, what was left out because
+	// it was there.
 	for _, d := range dirs {
-		if d.done && d.err == nil {
+		switch {
+		case d.there:
+			printThere(c.App.Writer, d.ref, d.root)
+		case d.done && d.err == nil:
 			printPushed(c.App.Writer, d.ref, d.root, d.res)
 		}
 	}
@@ -129,14 +179,23 @@ func runPushSubdirs(c *cli.Context, connect dialer) error {
 			fmt.Fprintf(c.App.ErrWriter, "  %s: %v\n", d.name, d.err)
 		}
 	}
+	// The counts are of the directories there were to push: those left out
+	// because the server had them are none of these.
 	switch {
 	case c.Context.Err() != nil:
 		return fmt.Errorf("interrupted: %s pushed, %s failed, %s not begun",
-			human.Count(uint64(len(dirs)-len(failed)-len(skipped))), human.Count(uint64(len(failed))), human.Count(uint64(len(skipped))))
+			human.Count(uint64(todo-len(failed)-len(waiting))), human.Count(uint64(len(failed))), human.Count(uint64(len(waiting))))
 	case len(failed) > 0:
-		return fmt.Errorf("%s of %s were not pushed", human.Count(uint64(len(failed))), directories(len(dirs)))
+		return fmt.Errorf("%s of %s were not pushed", human.Count(uint64(len(failed))), directories(todo))
 	}
 	return nil
+}
+
+// printThere writes the line of a directory that --skip-existing left out:
+// the reference and the root the server has for it, which is not
+// necessarily what the directory would come to now.
+func printThere(w io.Writer, name string, root key.Key) {
+	fmt.Fprintf(w, "%s %s: the server has the reference already, not pushed\n", name, root)
 }
 
 // subdirsOf returns the names of the directories in dir, in their order:
