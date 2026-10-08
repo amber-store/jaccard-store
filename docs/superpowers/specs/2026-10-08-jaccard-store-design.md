@@ -7,10 +7,9 @@ in line.
 
 ## 1. Purpose
 
-[jaccard-store-experiment](https://github.com/amber-store/jaccard-store-experiment)
-showed that references kept as one pack file each, where a pack may lean on
-one similar parent pack, capture 86 % of the sharing a fully deduplicating
-store achieves. This project turns that into a service:
+References can be kept as one pack file each and still share most of what
+a fully deduplicating store shares, if a pack may lean on one similar parent
+pack. This project is a service built on that:
 
 - a **server**, reachable over iroh, that keeps the packs in an S3 bucket and
   coordinates pushes and pulls without ever carrying pack bytes itself;

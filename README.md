@@ -13,10 +13,7 @@ Every reference gets at most one pack, named by its root key:
 A push sends the server a sketch of the reference's key set (its 256 lowest
 keys). The server answers with the three base packs whose sketches are
 nearest by estimated Jaccard distance, and the client uploads a patch pack
-against the best of them, or a base pack if none is near enough. This is the
-scheme of
-[jaccard-store-experiment](https://github.com/amber-store/jaccard-store-experiment),
-which measured it capturing 86 % of what a fully deduplicating store saves.
+against the best of them, or a base pack if none is near enough.
 
 The server never carries pack bytes. Clients move them between themselves
 and the bucket through pre-signed URLs; the server downloads an upload,

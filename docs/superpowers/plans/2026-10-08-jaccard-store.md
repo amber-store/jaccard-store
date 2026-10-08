@@ -22,7 +22,7 @@
 - Run Go through the flake: `nix develop -c go test ./...`. Do not run `go get` or `go mod tidy` while `tools/deps.go` exists; every dependency is already in `go.mod`.
 - Built binaries are removed after use. Nothing is committed that `go build` produced.
 - Tests come first: write the test, see it fail, then write the code.
-- Comment density and naming follow the experiment's code (`../jaccard-store-experiment`): a package comment that explains the format or the rule, a doc comment on every exported name, no narration inside functions.
+- Comment density and naming: a package comment that explains the format or the rule, a doc comment on every exported name, no narration inside functions.
 
 ## Review Focus
 
@@ -588,7 +588,7 @@ Tasks 1 and 2 share an owner. Tasks 1+2, 4, 5 and 6 are independent of each othe
 ### Task 0: Scaffold (done)
 
 - [x] `flake.nix`, `flake.lock`, `.envrc`, `.gitignore`, `sqlc.yaml`, `go.mod` with every dependency, `tools/deps.go`
-- [x] `keyset`, `sketch` ported from the experiment onto core keys, tests green
+- [x] `keyset`, `sketch` on core keys, tests green
 
 ### Task 1: packfile
 
