@@ -88,9 +88,10 @@ and the admin page shows what the store holds and who put it there.
 A pack is two S3 objects written by the client, the index and the data. A
 base pack has a third, the links, written by the server.
 
-### 4.1 Index
+Every integer in these formats, and the length of a protocol frame
+(section 5), is big-endian.
 
-All integers big-endian.
+### 4.1 Index
 
 ```
 magic    "JACIDX\x00\x01"                      8 bytes
