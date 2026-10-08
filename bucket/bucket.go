@@ -246,15 +246,28 @@ func (b *Bucket) PresignGet(ctx context.Context, objectKey string, ttl time.Dura
 	return req.URL, nil
 }
 
-// PresignPut returns a URL that stores the body of a plain PUT as the object,
-// for ttl from now. The request needs no header beyond its content length.
+// PutCondition is the value of the If-None-Match header that a PUT to a
+// PresignPut URL has to carry.
+const PutCondition = "*"
+
+// PresignPut returns a URL that stores the body of a plain PUT as the object
+// if there is no such object yet, for ttl from now. The request has to carry
+// the header "If-None-Match: *" (PutCondition) and needs nothing else beyond
+// its content length.
+//
+// The condition is part of what is signed. A server verifies an object
+// after it was uploaded, and the URL stays valid after that: without the
+// condition its holder could put other bytes in the place of the verified
+// ones. With it the object is written once; S3 answers a second PUT with
+// 412. The service behind the bucket has to honor conditional writes.
 func (b *Bucket) PresignPut(ctx context.Context, objectKey string, ttl time.Duration) (string, error) {
 	if err := checkTTL(ttl); err != nil {
 		return "", err
 	}
 	req, err := b.presigner.PresignPutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(b.name),
-		Key:    aws.String(objectKey),
+		Bucket:      aws.String(b.name),
+		Key:         aws.String(objectKey),
+		IfNoneMatch: aws.String(PutCondition),
 	}, s3.WithPresignExpires(ttl))
 	if err != nil {
 		return "", fmt.Errorf("bucket: presign a PUT of %s: %w", objectKey, err)

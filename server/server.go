@@ -41,13 +41,12 @@ const (
 	defaultURLTTL        = time.Hour
 	defaultPartSize      = 64 << 20
 	defaultVerifyJobs    = 2
+	defaultMaxPackBytes  = 16 << 30
 
 	// maxParts is the most parts S3 takes in one multipart upload.
 	maxParts = 10000
-	// straggler is how long after an upload's deadline its keys are
-	// deleted a second time: a PUT that began before the deadline can
-	// land after it.
-	straggler = time.Hour
+	// maxDataSize is the largest object S3 holds.
+	maxDataSize = 5 << 40
 	// requestTimeout bounds the wait for a request frame on a stream.
 	requestTimeout = 30 * time.Second
 	// shutdownGrace is how long Serve waits for requests under way.
@@ -88,6 +87,11 @@ type Config struct {
 	PartSize int64
 	// VerifyJobs is how many packs are verified at once. Zero means 2.
 	VerifyJobs int
+	// MaxPackBytes is the largest uncompressed size a pack may have. A
+	// verification writes that much to Scratch, and a few megabytes of zstd
+	// can announce terabytes, so this is what bounds the scratch space:
+	// VerifyJobs times MaxPackBytes. Zero means 16 GiB.
+	MaxPackBytes int64
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
 	// Log receives what the server has to say. Nil means slog.Default().
@@ -102,6 +106,7 @@ type Server struct {
 	uploadTimeout time.Duration
 	urlTTL        time.Duration
 	partSize      int64
+	maxPackBytes  uint64
 	verifying     chan struct{}
 	now           func() time.Time
 	log           *slog.Logger
@@ -131,6 +136,10 @@ func New(cfg Config) (*Server, error) {
 	}
 	if s.partSize <= 0 {
 		s.partSize = defaultPartSize
+	}
+	s.maxPackBytes = defaultMaxPackBytes
+	if cfg.MaxPackBytes > 0 {
+		s.maxPackBytes = uint64(cfg.MaxPackBytes)
 	}
 	jobs := cfg.VerifyJobs
 	if jobs <= 0 {
@@ -267,7 +276,7 @@ func (s *Server) serveStream(ctx context.Context, remote string, stream net.Conn
 	defer stream.Close()
 	stream.SetReadDeadline(time.Now().Add(requestTimeout))
 	var req wire.Request
-	if err := wire.ReadFrame(stream, &req); err != nil {
+	if err := wire.ReadRequest(stream, &req); err != nil {
 		s.log.Debug("reading a request", "remote", remote, "error", err)
 		return
 	}

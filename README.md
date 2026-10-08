@@ -56,8 +56,13 @@ answers mDNS on the local network.
 | `--url-ttl D` | `JACCARD_URL_TTL` | `1h` |
 | `--part-size N` | `JACCARD_PART_SIZE` | `64MiB` |
 | `--verify-jobs N` | `JACCARD_VERIFY_JOBS` | `2` |
+| `--max-pack-size N` | `JACCARD_MAX_PACK_SIZE` | `16GiB` |
 
-A flag wins over its variable.
+A flag wins over its variable. The two durations are lifetimes of pre-signed
+URLs, between one second and seven days. The server needs scratch space for
+`--max-pack-size` times `--verify-jobs`: a pack is decompressed there to be
+verified, and the limit is what keeps a few megabytes of upload from
+announcing terabytes.
 
 ### Admin page
 
@@ -66,7 +71,8 @@ in the bucket, the deduplication rate, every reference with how much of it
 its parent holds and how much of the parent it cannot reach, and every pack
 with who uploaded it and when. The figures are the server's own, computed
 from the packs it verified. The page is read-only and has no
-authentication, which is why it listens on loopback.
+authentication, which is why it listens on loopback. On loopback it answers
+only to a loopback address or `localhost` as the host name.
 
 ## Client
 
@@ -104,6 +110,11 @@ already has the parent's content never downloads it again.
 
 - **Access is open.** Whoever knows the endpoint ID can push, pull, list and
   delete, and so can fill the bucket.
+- **The bucket's service must honor conditional writes** (`If-None-Match: *`
+  on PUT, as AWS S3 does). Upload URLs are signed with that condition so
+  that an object the server has verified cannot be replaced afterwards.
+- A reference whose pack is larger than `--max-pack-size` uncompressed
+  cannot be pushed.
 - **The database is the only record** of the references and of which pack
   leans on which. Back it up; the bucket alone does not describe the store.
 - A verification needs scratch space for the uncompressed pack.

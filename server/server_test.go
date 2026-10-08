@@ -239,6 +239,31 @@ func httpPut(t *testing.T, url string, body []byte) string {
 	return res.Header.Get("ETag")
 }
 
+// httpCreate PUTs body to a URL for an index or for data in one piece, the
+// way a client has to: on the condition that there is no such object yet.
+func httpCreate(t *testing.T, url string, body []byte) {
+	t.Helper()
+	if status := httpCreateStatus(t, url, body); status != http.StatusOK {
+		t.Fatalf("PUT answered %d", status)
+	}
+}
+
+func httpCreateStatus(t *testing.T, url string, body []byte) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("If-None-Match", bucket.PutCondition)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	io.Copy(io.Discard, res.Body)
+	return res.StatusCode
+}
+
 func httpGet(t *testing.T, url string) []byte {
 	t.Helper()
 	res := httpDo(t, http.MethodGet, url, nil)
@@ -258,9 +283,9 @@ func (h *harness) upload(remote, name string, root key.Key, parent *key.Key, ind
 		req.Parent = parent[:]
 	}
 	resp := h.ok(h.handle(remote, req))
-	httpPut(h.t, resp.IndexURL, index.Encode())
+	httpCreate(h.t, resp.IndexURL, index.Encode())
 	if resp.Parts == nil {
-		httpPut(h.t, resp.DataURL, data)
+		httpCreate(h.t, resp.DataURL, data)
 		return resp
 	}
 	var done strings.Builder
@@ -590,25 +615,25 @@ func TestMalformedUploadsAreRefusedAndRemoved(t *testing.T) {
 	cases := map[string]func(t *testing.T, h *harness) wire.Response{
 		"data shorter than announced": func(t *testing.T, h *harness) wire.Response {
 			resp := h.ok(h.handle(alice, wire.Request{Op: wire.OpPushUpload, Name: "v1", Root: v1.root[:], DataSize: uint64(len(data)) + 1, Objects: uint64(index.Len())}))
-			httpPut(t, resp.IndexURL, index.Encode())
-			httpPut(t, resp.DataURL, data)
+			httpCreate(t, resp.IndexURL, index.Encode())
+			httpCreate(t, resp.DataURL, data)
 			return resp
 		},
 		"index never uploaded": func(t *testing.T, h *harness) wire.Response {
 			resp := h.ok(h.handle(alice, wire.Request{Op: wire.OpPushUpload, Name: "v1", Root: v1.root[:], DataSize: uint64(len(data)), Objects: uint64(index.Len())}))
-			httpPut(t, resp.DataURL, data)
+			httpCreate(t, resp.DataURL, data)
 			return resp
 		},
 		"index that is not an index": func(t *testing.T, h *harness) wire.Response {
 			resp := h.ok(h.handle(alice, wire.Request{Op: wire.OpPushUpload, Name: "v1", Root: v1.root[:], DataSize: uint64(len(data)), Objects: uint64(index.Len())}))
-			httpPut(t, resp.IndexURL, bytes.Repeat([]byte{0xAB}, len(index.Encode())))
-			httpPut(t, resp.DataURL, data)
+			httpCreate(t, resp.IndexURL, bytes.Repeat([]byte{0xAB}, len(index.Encode())))
+			httpCreate(t, resp.DataURL, data)
 			return resp
 		},
 		"data that is not zstd": func(t *testing.T, h *harness) wire.Response {
 			resp := h.ok(h.handle(alice, wire.Request{Op: wire.OpPushUpload, Name: "v1", Root: v1.root[:], DataSize: uint64(len(data)), Objects: uint64(index.Len())}))
-			httpPut(t, resp.IndexURL, index.Encode())
-			httpPut(t, resp.DataURL, bytes.Repeat([]byte{0xAB}, len(data)))
+			httpCreate(t, resp.IndexURL, index.Encode())
+			httpCreate(t, resp.DataURL, bytes.Repeat([]byte{0xAB}, len(data)))
 			return resp
 		},
 		"an object missing": func(t *testing.T, h *harness) wire.Response {
@@ -794,8 +819,8 @@ func TestExpiredUploadsAreSweptAway(t *testing.T) {
 	// One upload of a single PUT, complete but never committed.
 	index, data := v1.pack(t, nil)
 	whole := h.ok(h.handle(alice, wire.Request{Op: wire.OpPushUpload, Name: "v1", Root: v1.root[:], DataSize: 50, Objects: uint64(index.Len())}))
-	httpPut(t, whole.IndexURL, index.Encode())
-	httpPut(t, whole.DataURL, data[:50])
+	httpCreate(t, whole.IndexURL, index.Encode())
+	httpCreate(t, whole.DataURL, data[:50])
 	single, err := h.db.UploadByID(context.Background(), whole.UploadID)
 	if err != nil {
 		t.Fatal(err)
@@ -825,7 +850,7 @@ func TestExpiredUploadsAreSweptAway(t *testing.T) {
 
 	// A PUT that began before the deadline can land after it: the keys
 	// are deleted a second time an hour on.
-	httpPut(t, whole.DataURL, data[:50])
+	httpCreate(t, whole.DataURL, data[:50])
 	h.sweep()
 	if !h.present(single.DataKey) {
 		t.Fatal("the straggler was removed before the second deletion was due")
@@ -925,5 +950,103 @@ func TestNewPicksUpWhereACrashedServerLeftOff(t *testing.T) {
 func TestNewNeedsItsParts(t *testing.T) {
 	if _, err := server.New(server.Config{}); err == nil {
 		t.Fatal("New accepted a configuration without a database, a bucket and a scratch directory")
+	}
+}
+
+func TestPushUploadHoldsSizesToWhatTheServerTakes(t *testing.T) {
+	h := newHarness(t, func(c *server.Config) { c.MaxPackBytes = 1 << 20 })
+	v1 := newTree(t, filesV1)
+	req := wire.Request{Op: wire.OpPushUpload, Name: "v1", Root: v1.root[:], DataSize: 100, Objects: 1, Bytes: 1 << 20}
+	h.ok(h.handle(alice, req))
+
+	tooMuch := req
+	tooMuch.Bytes = 1<<20 + 1
+	if refusal := h.refused(h.handle(alice, tooMuch), wire.CodeBadRequest); !strings.Contains(refusal.Message, "limit") {
+		t.Errorf("the refusal does not name the limit: %v", refusal)
+	}
+	// Sizes at the edge of what an integer holds once made the layout of
+	// the parts run away; they are refused before anything is laid out.
+	for _, size := range []uint64{1<<63 - 1, 1 << 63, 1<<64 - 1, 5<<40 + 1} {
+		huge := req
+		huge.DataSize = size
+		h.refused(h.handle(alice, huge), wire.CodeBadRequest)
+	}
+	if st, err := h.db.Stats(context.Background()); err != nil || st.Uploads != 1 {
+		t.Fatalf("refused requests left uploads behind: %+v, %v", st, err)
+	}
+}
+
+func TestAnIndexAnnouncingMoreThanTheLimitIsRefusedUnread(t *testing.T) {
+	v1 := newTree(t, filesV1)
+	index, data := v1.pack(t, nil)
+	h := newHarness(t, func(c *server.Config) { c.MaxPackBytes = int64(index.DataSize()) - 1 })
+
+	// The client lies about the size when it opens the upload; the index
+	// it then uploads tells the truth.
+	up := h.ok(h.handle(alice, wire.Request{Op: wire.OpPushUpload, Name: "v1", Root: v1.root[:], DataSize: uint64(len(data)), Objects: uint64(index.Len()), Bytes: 1}))
+	httpCreate(t, up.IndexURL, index.Encode())
+	httpCreate(t, up.DataURL, data)
+	refusal := h.refused(h.commit(alice, up.UploadID), wire.CodeMalformedPack)
+	if !strings.Contains(refusal.Message, "limit") {
+		t.Errorf("the refusal does not name the limit: %v", refusal)
+	}
+	if entries, _ := os.ReadDir(h.scratch); len(entries) != 0 {
+		t.Errorf("%d files were left in the scratch directory", len(entries))
+	}
+
+	// At the limit exactly the pack is taken.
+	h = newHarness(t, func(c *server.Config) { c.MaxPackBytes = int64(index.DataSize()) })
+	up = h.upload(alice, "v1", v1.root, nil, index, data)
+	h.ok(h.commit(alice, up.UploadID))
+}
+
+func TestAVerifiedPackCannotBeReplacedThroughItsUploadURLs(t *testing.T) {
+	h := newHarness(t, nil)
+	v1, v2 := newTree(t, filesV1), newTree(t, filesV2)
+	index, data := v1.pack(t, nil)
+	up := h.upload(alice, "v1", v1.root, nil, index, data)
+	h.ok(h.commit(alice, up.UploadID))
+	p := h.packOf(v1.root)
+
+	// The URLs are valid until the upload's deadline, long after the commit.
+	otherIndex, otherData := v2.pack(t, nil)
+	if status := httpCreateStatus(t, up.DataURL, otherData); status != http.StatusPreconditionFailed {
+		t.Errorf("a second PUT of the data answered %d, want 412", status)
+	}
+	if status := httpCreateStatus(t, up.IndexURL, otherIndex.Encode()); status != http.StatusPreconditionFailed {
+		t.Errorf("a second PUT of the index answered %d, want 412", status)
+	}
+	if !bytes.Equal(h.read(p.DataKey), data) || !bytes.Equal(h.read(p.IndexKey), index.Encode()) {
+		t.Fatal("the verified pack was replaced")
+	}
+}
+
+func TestWhatARefusedUploadPutsBackIsClearedAfterItsDeadline(t *testing.T) {
+	h := newHarness(t, nil)
+	v1, v2 := newTree(t, filesV1), newTree(t, filesV2)
+	index, data := v2.pack(t, nil) // not the pack of v1's root
+	up := h.upload(alice, "v1", v1.root, nil, index, data)
+	u, err := h.db.UploadByID(context.Background(), up.UploadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.refused(h.commit(alice, up.UploadID), wire.CodeMalformedPack)
+	h.sweep()
+	if h.present(u.DataKey) {
+		t.Fatal("the refused upload's data is still in the bucket")
+	}
+
+	// The upload is forgotten, but its URLs work until its deadline.
+	httpCreate(t, up.DataURL, data)
+	httpCreate(t, up.IndexURL, index.Encode())
+	h.clock.Advance(time.Hour) // the deadline
+	h.sweep()
+	h.clock.Advance(db.Straggler)
+	h.sweep()
+	if h.present(u.DataKey) || h.present(u.IndexKey) {
+		t.Fatal("what was put back after the refusal was never cleared")
+	}
+	if st, _ := h.db.Stats(context.Background()); st.Deletions != 0 {
+		t.Fatalf("%d deletions are left in the queue", st.Deletions)
 	}
 }

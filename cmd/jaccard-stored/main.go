@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -41,6 +42,10 @@ const (
 	scratchDir  = "scratch"
 	sweepEvery  = 30 * time.Second
 	minPartSize = 5 << 20 // what S3 takes for a part that is not the last
+	// A pre-signed URL is valid for a second at least and seven days at
+	// most; the two lifetimes are those of URLs.
+	minLifetime = time.Second
+	maxLifetime = 7 * 24 * time.Hour
 )
 
 func main() {
@@ -61,6 +66,7 @@ type settings struct {
 	urlTTL        time.Duration
 	partSize      int64
 	verifyJobs    int
+	maxPackBytes  int64
 }
 
 // newApp returns the command. run is what it does once the settings are
@@ -94,6 +100,8 @@ func newApp(stderr io.Writer, run func(context.Context, io.Writer, settings) err
 				Usage: "`SIZE` above which data is uploaded in parts, and of a part"},
 			&cli.IntFlag{Name: "verify-jobs", EnvVars: []string{"JACCARD_VERIFY_JOBS"}, Value: 2,
 				Usage: "packs verified at once; each needs scratch space for its uncompressed data"},
+			&cli.StringFlag{Name: "max-pack-size", EnvVars: []string{"JACCARD_MAX_PACK_SIZE"}, Value: "16GiB",
+				Usage: "largest uncompressed `SIZE` of a pack; the scratch space needed is this times --verify-jobs"},
 		},
 		Action: func(c *cli.Context) error {
 			if c.NArg() != 0 {
@@ -127,13 +135,16 @@ func readSettings(c *cli.Context) (settings, error) {
 	if s.partSize, err = parseSize(c.String("part-size")); err != nil {
 		return settings{}, fmt.Errorf("--part-size: %w", err)
 	}
+	if s.maxPackBytes, err = parseSize(c.String("max-pack-size")); err != nil {
+		return settings{}, fmt.Errorf("--max-pack-size: %w", err)
+	}
 	switch {
 	case s.partSize < minPartSize:
 		return settings{}, fmt.Errorf("--part-size: %s is below the 5MiB S3 takes for a part", c.String("part-size"))
-	case s.uploadTimeout <= 0:
-		return settings{}, errors.New("--upload-timeout: want a duration above zero")
-	case s.urlTTL <= 0:
-		return settings{}, errors.New("--url-ttl: want a duration above zero")
+	case s.uploadTimeout < minLifetime || s.uploadTimeout > maxLifetime:
+		return settings{}, fmt.Errorf("--upload-timeout: %s is not between %s and %s, which is what the URLs of an upload can be signed for", s.uploadTimeout, minLifetime, maxLifetime)
+	case s.urlTTL < minLifetime || s.urlTTL > maxLifetime:
+		return settings{}, fmt.Errorf("--url-ttl: %s is not between %s and %s, which is what a URL can be signed for", s.urlTTL, minLifetime, maxLifetime)
 	case s.verifyJobs < 1:
 		return settings{}, errors.New("--verify-jobs: want at least 1")
 	}
@@ -162,7 +173,7 @@ func parseSize(s string) (int64, error) {
 	return n * factor, nil
 }
 
-// serve runs the server until ctx is done.
+// serve runs the server until ctx is done or the admin listener fails.
 func serve(ctx context.Context, stderr io.Writer, s settings) (err error) {
 	log := slog.New(slog.NewTextHandler(stderr, nil))
 	if err := os.MkdirAll(s.data, 0o700); err != nil {
@@ -176,6 +187,8 @@ func serve(ctx context.Context, stderr io.Writer, s settings) (err error) {
 	if err != nil {
 		return err
 	}
+	// Deferred first, so it runs last: after everything that reads and
+	// writes the database has stopped.
 	defer func() { err = errors.Join(err, database.Close()) }()
 	b, err := bucket.New(ctx, s.bucket)
 	if err != nil {
@@ -189,6 +202,7 @@ func serve(ctx context.Context, stderr io.Writer, s settings) (err error) {
 		URLTTL:        s.urlTTL,
 		PartSize:      s.partSize,
 		VerifyJobs:    s.verifyJobs,
+		MaxPackBytes:  s.maxPackBytes,
 		Log:           log,
 	})
 	if err != nil {
@@ -201,30 +215,51 @@ func serve(ctx context.Context, stderr io.Writer, s settings) (err error) {
 	if err != nil {
 		return fmt.Errorf("admin page: %w", err)
 	}
-	web := &http.Server{Handler: admin.Handler(database), ReadHeaderTimeout: 10 * time.Second}
-	webDone := make(chan error, 1)
-	go func() { webDone <- web.Serve(listener) }()
-	defer func() {
-		stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		web.Shutdown(stop)
-	}()
+	page := admin.Handler(database)
+	if tcp, ok := listener.Addr().(*net.TCPAddr); ok && tcp.IP.IsLoopback() {
+		page = admin.LocalOnly(page)
+	} else {
+		log.Warn("the admin page has no authentication and is listening beyond this machine", "addr", listener.Addr().String())
+	}
+	web := &http.Server{Handler: page, ReadHeaderTimeout: 10 * time.Second}
 	log.Info("admin page", "addr", "http://"+listener.Addr().String())
+
+	// Whatever ends first ends the rest: the context is done for all of
+	// them, and serve returns when all have stopped.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	webFailed := make(chan error, 1)
+	wg.Go(func() {
+		if err := web.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
+			webFailed <- err
+			cancel()
+		}
+	})
+	wg.Go(func() {
+		<-ctx.Done()
+		stop, done := context.WithTimeout(context.Background(), 5*time.Second)
+		defer done()
+		web.Shutdown(stop)
+	})
 
 	ep, err := node.Bind(ctx, node.ServerConfig{Key: sk, ALPN: wire.ALPN, Log: log})
 	if err != nil {
+		cancel()
 		return err
 	}
 	defer ep.Shutdown(context.Background())
 	log.Info("serving", "endpoint", ep.ID().String(), "bucket", s.bucket.Bucket)
 
-	go srv.RunSweeper(ctx, sweepEvery)
-	served := make(chan error, 1)
-	go func() { served <- srv.Serve(ctx, ep) }()
+	wg.Go(func() { srv.RunSweeper(ctx, sweepEvery) })
+	err = srv.Serve(ctx, ep)
+	cancel()
 	select {
-	case err := <-served:
+	case werr := <-webFailed:
+		return errors.Join(err, fmt.Errorf("admin page: %w", werr))
+	default:
 		return err
-	case err := <-webDone:
-		return fmt.Errorf("admin page: %w", err)
 	}
 }

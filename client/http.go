@@ -8,19 +8,51 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/amber-store/jaccard-store/wire"
 	"golang.org/x/sync/errgroup"
 )
 
-// errorBody is how much of a refusal's body is quoted in an error.
-const errorBody = 512
+// errorBody is how much of a refusal's body is read to find out why.
+const errorBody = 4096
 
-// httpError describes an answer that is not the success asked for. The URL
-// is left out: it is pre-signed, and its signature is a credential.
+// httpError describes an answer that is not the success asked for, by its
+// status and, when the body is S3's error document, by the code and the
+// message in it. Nothing else of the body is repeated: the document of a
+// refused signature spells out the signature and the key ID it was made
+// with. The URL is left out as well: it is pre-signed, and its signature is
+// a credential.
 func httpError(what string, res *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(res.Body, errorBody))
-	return fmt.Errorf("%s: the bucket answered %s: %s", what, res.Status, bytes.TrimSpace(body))
+	var doc struct {
+		XMLName xml.Name
+		Code    string `xml:"Code"`
+		Message string `xml:"Message"`
+	}
+	if xml.Unmarshal(body, &doc) == nil && doc.XMLName.Local == "Error" && doc.Code != "" {
+		return &statusError{what: what, status: res.StatusCode, text: fmt.Sprintf("%s: the bucket answered %s: %s: %s", what, res.Status, doc.Code, doc.Message)}
+	}
+	return &statusError{what: what, status: res.StatusCode, text: fmt.Sprintf("%s: the bucket answered %s", what, res.Status)}
+}
+
+// statusError is an answer of the bucket that is not a success.
+type statusError struct {
+	what   string
+	status int
+	text   string
+}
+
+func (e *statusError) Error() string { return e.text }
+
+// transient reports whether err is worth another attempt: the request did
+// not get through, or the bucket said it was busy or broken.
+func transient(err error) bool {
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.status >= 500 || se.status == http.StatusTooManyRequests || se.status == http.StatusRequestTimeout
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 // transportError strips the URL from an error of the HTTP client, which
@@ -69,9 +101,23 @@ func (c *Client) getAll(ctx context.Context, what, url string, size uint64) ([]b
 	return b, nil
 }
 
-// put sends size bytes of body to a pre-signed URL and returns the ETag of
+// create stores size bytes of body as a new object: the PUT of an index or
+// of data in one piece. The server signed the URL for a request that
+// carries the condition "If-None-Match: *", which lets the object be
+// written once and never replaced.
+func (c *Client) create(ctx context.Context, what, url string, body io.Reader, size int64) error {
+	_, err := c.send(ctx, what, url, body, size, true)
+	return err
+}
+
+// putPart stores one part of a multipart upload and returns its ETag.
+func (c *Client) putPart(ctx context.Context, what, url string, body io.Reader, size int64) (string, error) {
+	return c.send(ctx, what, url, body, size, false)
+}
+
+// send PUTs size bytes of body to a pre-signed URL and returns the ETag of
 // the answer.
-func (c *Client) put(ctx context.Context, what, url string, body io.Reader, size int64) (string, error) {
+func (c *Client) send(ctx context.Context, what, url string, body io.Reader, size int64, once bool) (string, error) {
 	if size == 0 {
 		body = http.NoBody
 	}
@@ -80,6 +126,9 @@ func (c *Client) put(ctx context.Context, what, url string, body io.Reader, size
 		return "", fmt.Errorf("%s: malformed URL", what)
 	}
 	req.ContentLength = size
+	if once {
+		req.Header.Set("If-None-Match", "*")
+	}
 	res, err := c.http.Do(req)
 	if err != nil {
 		return "", transportError(what, err)
@@ -104,6 +153,9 @@ type completePart struct {
 	ETag       string `xml:"ETag"`
 }
 
+// partAttempts is how often one part is sent before the upload is given up.
+const partAttempts = 4
+
 // putParts uploads size bytes of data in the parts the server laid out, a
 // few at a time, and completes the upload.
 func (c *Client) putParts(ctx context.Context, data io.ReaderAt, size int64, parts *wire.Parts, parallel int) error {
@@ -125,7 +177,21 @@ func (c *Client) putParts(ctx context.Context, data io.ReaderAt, size int64, par
 			off := int64(i) * partSize
 			n := min(partSize, size-off)
 			what := fmt.Sprintf("data part %d", i+1)
-			etag, err := c.put(gctx, what, url, io.NewSectionReader(data, off, n), n)
+			// A part is a section of the file and can be sent again; a
+			// pack of hundreds of parts should not be lost to one that
+			// met a busy bucket.
+			var etag string
+			var err error
+			for attempt := 1; ; attempt++ {
+				etag, err = c.putPart(gctx, what, url, io.NewSectionReader(data, off, n), n)
+				if err == nil || attempt == partAttempts || !transient(err) || gctx.Err() != nil {
+					break
+				}
+				select {
+				case <-time.After(c.retryWait * time.Duration(attempt)):
+				case <-gctx.Done():
+				}
+			}
 			if err != nil {
 				return err
 			}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/amber-store/core/fstree"
@@ -64,6 +65,9 @@ func (c *Client) Push(ctx context.Context, objects *packstore.Store, name string
 	return res, err
 }
 
+// maxCandidates is how many base packs a server offers.
+const maxCandidates = 3
+
 // candidate is a base pack the server offered, with what it shares with
 // the key set being pushed.
 type candidate struct {
@@ -97,7 +101,7 @@ func (c *Client) push(ctx context.Context, objects *packstore.Store, name string
 		f.Close()
 		os.Remove(f.Name())
 	}()
-	index, patch, err := build(f, objects, keys, best, opts.MinDedup)
+	index, patch, err := build(ctx, f, objects, keys, best, opts.MinDedup)
 	if err != nil {
 		return PushResult{}, fmt.Errorf("push: building the pack: %w", err)
 	}
@@ -107,7 +111,7 @@ func (c *Client) push(ctx context.Context, objects *packstore.Store, name string
 	}
 	res := PushResult{Root: root, Objects: uint64(index.Len()), Bytes: index.DataSize(), DataSize: uint64(info.Size())}
 
-	upload := wire.Request{Op: wire.OpPushUpload, Name: name, Root: root[:], DataSize: res.DataSize, Objects: res.Objects}
+	upload := wire.Request{Op: wire.OpPushUpload, Name: name, Root: root[:], DataSize: res.DataSize, Objects: res.Objects, Bytes: res.Bytes}
 	if patch {
 		res.Parent = &best.root
 		upload.Parent = best.root[:]
@@ -122,15 +126,15 @@ func (c *Client) push(ctx context.Context, objects *packstore.Store, name string
 	}
 
 	encoded := index.Encode()
-	if _, err := c.put(ctx, "index", urls.IndexURL, bytes.NewReader(encoded), int64(len(encoded))); err != nil {
+	if err := c.create(ctx, "index", urls.IndexURL, bytes.NewReader(encoded), int64(len(encoded))); err != nil {
 		return PushResult{}, fmt.Errorf("push: %w", err)
 	}
 	if urls.Parts != nil {
 		err = c.putParts(ctx, f, info.Size(), urls.Parts, opts.Parallel)
 	} else {
-		if _, err = f.Seek(0, 0); err == nil {
-			_, err = c.put(ctx, "data", urls.DataURL, f, info.Size())
-		}
+		// A section, not the file: the HTTP client closes a body that can
+		// be closed, and the file is this function's to close.
+		err = c.create(ctx, "data", urls.DataURL, io.NewSectionReader(f, 0, info.Size()), info.Size())
 	}
 	if err != nil {
 		return PushResult{}, fmt.Errorf("push: %w", err)
@@ -148,7 +152,9 @@ func (c *Client) push(ctx context.Context, objects *packstore.Store, name string
 // since the offer, and a base pack is always a correct answer.
 func (c *Client) best(ctx context.Context, keys []key.Key, offered []wire.Candidate) (*candidate, error) {
 	var best *candidate
-	for _, o := range offered {
+	// The server offers three packs at most; no more than that are fetched,
+	// whatever it sends.
+	for _, o := range offered[:min(len(offered), maxCandidates)] {
 		root, err := key.Parse(o.Root)
 		if err != nil || o.Objects > packfile.MaxEntries {
 			continue
@@ -182,7 +188,7 @@ func (c *Client) best(ctx context.Context, keys []key.Key, offered []wire.Candid
 // pack of best. The objects best lacks go in first; if best then holds at
 // least minDedup of the bytes, that is the pack. Otherwise the objects best
 // holds are appended to the same stream and the pack is a base pack.
-func build(f *os.File, objects *packstore.Store, keys []key.Key, best *candidate, minDedup float64) (*packfile.Index, bool, error) {
+func build(ctx context.Context, f *os.File, objects *packstore.Store, keys []key.Key, best *candidate, minDedup float64) (*packfile.Index, bool, error) {
 	var own, shared []key.Key
 	for _, k := range keys {
 		if best != nil && best.index.Has(k) {
@@ -199,6 +205,11 @@ func build(f *os.File, objects *packstore.Store, keys []key.Key, best *candidate
 		// The pack's order is free, so the packstore is read in its own.
 		objects.SortByLocation(keys)
 		for _, k := range keys {
+			// Reading and compressing a large reference takes minutes,
+			// and nothing else on the way looks at the context.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			data, err := objects.Get(k)
 			if err != nil {
 				return fmt.Errorf("object %s: %w", k, err)

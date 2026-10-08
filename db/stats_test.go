@@ -9,8 +9,9 @@ import (
 )
 
 // figures fills a database with a base pack under "a", a patch pack on it
-// under "p" and "p2", a second base pack under "b", an open upload and four
-// queued deletions, and returns the three packs and their roots.
+// under "p" and "p2", a second base pack under "b", an open upload and the
+// six queued deletions of a failed one (its three keys, twice), and returns
+// the three packs and their roots.
 func figures(t *testing.T, d *DB) (a, p, b Pack, roots []key.Key) {
 	t.Helper()
 	roots = testKeys(t, "root", 5)
@@ -21,7 +22,7 @@ func figures(t *testing.T, d *DB) (a, p, b Pack, roots []key.Key) {
 		if _, err := d.CreateUpload(ctx, u, parent); err != nil {
 			t.Fatal(err)
 		}
-		pack, err := d.CommitUpload(ctx, id, v, t0, later)
+		pack, err := d.CommitUpload(ctx, id, &v, t0, later)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -55,7 +56,7 @@ func TestStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Stats{
-		Refs: 4, BasePacks: 2, PatchPacks: 1, Uploads: 1, Deletions: 3,
+		Refs: 4, BasePacks: 2, PatchPacks: 1, Uploads: 1, Deletions: 6,
 		S3Bytes:      (100 + 60 + 20) + (10 + 104) + (200 + 148 + 30),
 		DataBytes:    100 + 10 + 200,
 		StoredBytes:  1000 + 50 + 3000,

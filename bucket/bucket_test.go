@@ -117,7 +117,10 @@ func TestAbsentKey(t *testing.T) {
 	}
 }
 
-func TestPresignPutTakesPlainRequest(t *testing.T) {
+// A pre-signed PUT creates the object and can never replace it: whoever
+// holds the URL must not be able to change an object after the server has
+// read it.
+func TestPresignPutCreatesAndNeverReplaces(t *testing.T) {
 	b := buckettest.New(t)
 	objectKey := b.Key(key.Key{0: 2}, "u2", "data")
 	want := []byte("compressed data")
@@ -126,15 +129,42 @@ func TestPresignPutTakesPlainRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PresignPut: %v", err)
 	}
-	if _, q := query(t, rawURL); q.Get("X-Amz-SignedHeaders") != "host" || q.Get("X-Amz-Expires") != "3600" {
-		t.Fatalf("PresignPut signs %q for %q seconds, want host and 3600: %s",
+	// The condition is under the signature, so a request without the header,
+	// or with another value, is not the request that was signed.
+	if _, q := query(t, rawURL); q.Get("X-Amz-SignedHeaders") != "host;if-none-match" || q.Get("X-Amz-Expires") != "3600" {
+		t.Fatalf("PresignPut signs %q for %q seconds, want host;if-none-match and 3600: %s",
 			q.Get("X-Amz-SignedHeaders"), q.Get("X-Amz-Expires"), rawURL)
 	}
-	send(t, http.MethodPut, rawURL, want)
-
+	if status := conditionalPut(t, rawURL, want); status != http.StatusOK {
+		t.Fatalf("the first PUT answered %d", status)
+	}
 	if got := get(t, b, objectKey); !bytes.Equal(got, want) {
 		t.Fatalf("object = %q, want %q", got, want)
 	}
+
+	if status := conditionalPut(t, rawURL, []byte("something else")); status != http.StatusPreconditionFailed {
+		t.Fatalf("a second PUT to the same URL answered %d, want 412", status)
+	}
+	if got := get(t, b, objectKey); !bytes.Equal(got, want) {
+		t.Fatalf("the object was replaced: %q", got)
+	}
+}
+
+// conditionalPut sends body the way a client must use a PresignPut URL.
+func conditionalPut(t *testing.T, rawURL string, body []byte) int {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, rawURL, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("If-None-Match", bucket.PutCondition)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
 }
 
 func TestPresignGetReturnsObject(t *testing.T) {

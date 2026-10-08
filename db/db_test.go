@@ -93,8 +93,8 @@ func nextUploadID() string {
 
 // verified is what a test commits: a base pack with the sketch sk, or a patch
 // pack when sk is nil.
-func verified(sk sketch.Sketch) Verified {
-	v := Verified{IndexSize: 16 + 44*10, Objects: 10, Bytes: 1000, Sketch: sk}
+func verified(sk sketch.Sketch) *Verified {
+	v := &Verified{IndexSize: 16 + 44*10, Objects: 10, Bytes: 1000, Sketch: sk}
 	if sk == nil {
 		v.SharedObjects, v.SharedBytes = 4, 400
 	} else {

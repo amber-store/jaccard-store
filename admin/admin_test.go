@@ -64,7 +64,7 @@ func newStore(t *testing.T) *store {
 		if _, err := d.BeginVerify(ctx, id, uploader); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := d.CommitUpload(ctx, id, v, uploaded, later); err != nil {
+		if _, err := d.CommitUpload(ctx, id, &v, uploaded, later); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -407,5 +407,39 @@ func TestTheAPIIsReadOnlyAndBounded(t *testing.T) {
 	s.get(t, "/api/stats", http.StatusOK, &stats)
 	if stats["refs"] != 3 {
 		t.Errorf("the store changed: %v refs", stats["refs"])
+	}
+}
+
+func TestLocalOnlyRefusesANameThatIsNotThisMachines(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") })
+	srv := httptest.NewServer(admin.LocalOnly(inner))
+	defer srv.Close()
+	for host, want := range map[string]int{
+		"":                     http.StatusOK, // the listener's own address
+		"localhost:8080":       http.StatusOK,
+		"LOCALHOST":            http.StatusOK,
+		"127.0.0.1:8080":       http.StatusOK,
+		"[::1]:8080":           http.StatusOK,
+		"evil.example":         http.StatusForbidden,
+		"evil.example:8080":    http.StatusForbidden,
+		"localhost.evil.test":  http.StatusForbidden,
+		"192.168.1.10:8080":    http.StatusForbidden,
+		"127.0.0.1.evil.test.": http.StatusForbidden,
+	} {
+		req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/stats", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if host != "" {
+			req.Host = host
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != want {
+			t.Errorf("Host %q answered %d, want %d", host, res.StatusCode, want)
+		}
 	}
 }

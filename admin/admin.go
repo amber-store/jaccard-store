@@ -16,8 +16,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/amber-store/core/key"
@@ -63,6 +65,29 @@ func Handler(d *db.DB) http.Handler {
 		files.ServeHTTP(w, r)
 	}))
 	return mux
+}
+
+// LocalOnly wraps the admin handler for a listener on loopback: it refuses
+// a request whose Host is neither a loopback address nor "localhost".
+//
+// A listener on loopback is reached by the browser of whoever sits at the
+// machine, and a page from anywhere can point its own name at 127.0.0.1
+// and then read the API as if it were its own. Such a request still names
+// the page's host, which is what gives it away.
+func LocalOnly(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if name, _, err := net.SplitHostPort(host); err == nil {
+			host = name
+		}
+		host = strings.Trim(host, "[]")
+		ip := net.ParseIP(host)
+		if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
+			fail(w, http.StatusForbidden, "the admin page answers on the local machine only")
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 type api struct {
@@ -295,8 +320,13 @@ func (a *api) uploads(w http.ResponseWriter, r *http.Request) {
 			Deadline:  stamp(u.Deadline),
 		}
 		if u.ParentID != 0 {
+			// The list and this lookup are two reads: an upload that
+			// ended in between can have taken its parent with it.
 			parent, err := a.db.PackByID(r.Context(), u.ParentID)
-			if err != nil {
+			switch {
+			case errors.Is(err, db.ErrNotFound):
+				continue
+			case err != nil:
 				failed(w, err)
 				return
 			}

@@ -32,7 +32,7 @@ func TestRequestsRoundTrip(t *testing.T) {
 	root := bytes.Repeat([]byte{7}, 32)
 	for _, req := range []wire.Request{
 		{Op: wire.OpPushStart, Name: "a/b", Root: root, Sketch: [][]byte{bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)}},
-		{Op: wire.OpPushUpload, Name: "a/b", Root: root, Parent: bytes.Repeat([]byte{9}, 32), DataSize: 1 << 40, Objects: 12345},
+		{Op: wire.OpPushUpload, Name: "a/b", Root: root, Parent: bytes.Repeat([]byte{9}, 32), DataSize: 1 << 40, Objects: 12345, Bytes: 1 << 41},
 		{Op: wire.OpPushUpload, Name: "a/b", Root: root},
 		{Op: wire.OpPushCommit, UploadID: "0123456789abcdef"},
 		{Op: wire.OpPull, Name: "a/b"},
@@ -157,5 +157,28 @@ func TestErrorf(t *testing.T) {
 	resp := wire.Errorf(wire.CodeBadRequest, "name %q", "x")
 	if resp.Error == nil || resp.Error.Code != wire.CodeBadRequest || resp.Error.Message != `name "x"` {
 		t.Fatalf("Errorf = %+v", resp)
+	}
+}
+
+func TestReadRequestHoldsRequestsToTheirOwnLimit(t *testing.T) {
+	var prefix [4]byte
+	binary.BigEndian.PutUint32(prefix[:], wire.MaxRequest+1)
+	var req wire.Request
+	err := wire.ReadRequest(&oversized{t: t, prefix: bytes.NewReader(prefix[:])}, &req)
+	if !errors.Is(err, wire.ErrFrameTooLarge) {
+		t.Fatalf("ReadRequest = %v, want ErrFrameTooLarge", err)
+	}
+
+	// The largest request there is fits.
+	big := wire.Request{Op: wire.OpPushStart, Name: strings.Repeat("n", 255), Root: bytes.Repeat([]byte{7}, 32)}
+	for range 4096 {
+		big.Sketch = append(big.Sketch, bytes.Repeat([]byte{1}, 32))
+	}
+	var buf bytes.Buffer
+	if err := wire.WriteFrame(&buf, big); err != nil {
+		t.Fatal(err)
+	}
+	if err := wire.ReadRequest(&buf, &req); err != nil || len(req.Sketch) != 4096 {
+		t.Fatalf("ReadRequest of the largest request: %v, %d keys", err, len(req.Sketch))
 	}
 }

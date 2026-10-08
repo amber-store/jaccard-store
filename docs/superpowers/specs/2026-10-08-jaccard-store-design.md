@@ -70,6 +70,25 @@ and the admin page shows what the store holds and who put it there.
 - The CLI keeps a key file, so the uploader ID is stable.
 - Two binaries: `jaccard-stored` (server) and `jaccard-store` (client).
 
+### 2.3 Made in review of the implementation
+
+Access is open, so every request and every uploaded byte is hostile input.
+Reading the code with that in mind added four rules to this document:
+
+- **An uploaded object is written once.** The URLs of an upload stay valid
+  until its deadline, long after the server has verified what was uploaded.
+  The PUT URLs for the index and for data in one piece are therefore signed
+  for a request carrying `If-None-Match: *`: the object can be created and
+  never replaced (section 5.2).
+- **A pack has a largest uncompressed size** (`--max-pack-size`, 16 GiB by
+  default). A few megabytes of zstd can announce terabytes, and verification
+  writes the uncompressed data to scratch space (section 6).
+- **Every upload that ends without a pack is cleared twice**, not only one
+  that expires: once at once, and once an hour after its deadline, when its
+  URLs can write no more (section 7.3).
+- **A request frame is at most 1 MiB**, though an answer may be 16 MiB
+  (section 5).
+
 ## 3. Terms
 
 - **Reference (ref)**: a name pointing at a root key.
@@ -135,15 +154,15 @@ pack holds its whole key set, so every child has a position.
 
 `<prefix>packs/<root hex>/<upload id>.idx`, `.data` and `.links`. The
 upload ID keeps concurrent uploads of one root apart and means nothing is
-ever renamed.
+ever renamed. A prefix that does not end in a slash is given one.
 
 ## 5. Protocol
 
 ALPN `amber/jaccard-store/1`. Each request is one bidirectional QUIC stream:
 the client writes one frame and closes its side, the server writes one frame
 and closes. A frame is a 4-byte big-endian length and that many bytes of
-CBOR, at most 16 MiB. A request is a map with `op` and the operation's
-fields. A response carries either the result fields or
+CBOR, at most 16 MiB for an answer and 1 MiB for a request. A request is a
+map with `op` and the operation's fields. A response carries either the result fields or
 `error: {code, message}`.
 
 Error codes: `bad_request`, `not_found`, `parent_gone`, `unknown_upload`,
@@ -172,7 +191,12 @@ then to the lower root.
 ### 5.2 `push-upload`
 
 Request: `name`, `root`, `parent` (root of a base pack, or absent),
-`data_size` (bytes of the compressed data), `objects` (index entries).
+`data_size` (bytes of the compressed data), `objects` (index entries),
+`bytes` (the uncompressed size of the data).
+
+A `data_size` above 5 TiB, which is the largest object S3 holds, and `bytes`
+above the server's largest pack size are a `bad_request`, before anything is
+uploaded.
 
 - If the root has a pack by now: as `stored` above.
 - If `parent` is not a base pack the server knows: `parent_gone`. The client
@@ -190,6 +214,14 @@ The pre-signed part URLs come from the SDK's presign client; the completion
 URL is signed with the SDK's SigV4 signer (`PresignHTTP`), since the presign
 client has no call for it.
 
+The PUT URLs for the index and for data in one piece are signed for a
+request that carries the header `If-None-Match: *`, which the client has to
+send. S3 then writes the object only if it does not exist: what the server
+has verified cannot be replaced through a URL that is still valid. Data in
+parts needs no such header: once the upload is completed, its parts and its
+completion URL can change nothing. The service behind the bucket has to
+honor conditional writes.
+
 A pending upload counts as a reference to its parent, so the parent cannot
 be collected while the upload is open.
 
@@ -202,7 +234,9 @@ it; for anyone else, and for an upload that has expired, the answer is
 The server verifies the pack (section 6). On success it records the pack,
 points the ref at it, and answers `ok`. If the root got a pack in the
 meantime, the upload's objects are queued for deletion, the ref is pointed
-at the existing pack, and the answer is `ok` as well. A pack that fails
+at the existing pack, and the answer is `ok` as well. An upload that was
+not verified is never recorded: if that other pack is collected before the
+commit lands, the upload is verified after all. A pack that fails
 verification is answered with `malformed_pack` and the reason, its objects
 are queued for deletion, and the upload is forgotten. If S3 cannot be
 reached, the answer is `internal` and the upload stays open for a retry.
@@ -230,7 +264,9 @@ At `push-commit` the server:
 
 1. Checks with HEAD that both objects exist and have the declared sizes
    (index: 16 + 44 × `objects`).
-2. Downloads and parses the index (section 4.1).
+2. Downloads and parses the index (section 4.1), and refuses one whose
+   lengths add up to more than the largest pack size, before any data is
+   fetched.
 3. Downloads the data and decompresses it into a scratch file, refusing a
    stream that is shorter or longer than the index says.
 4. For a patch pack, downloads the parent's index and checks that no key of
@@ -357,7 +393,10 @@ Every 30 seconds:
 - An upload past its deadline and not being verified is forgotten: its
   multipart upload is queued for abort, and its keys are queued for
   deletion now and again an hour later, because a PUT that began before the
-  deadline can land after it.
+  deadline can land after it. An upload that ends earlier without a pack,
+  refused as malformed or made redundant by another, is cleared the same
+  way: at once, and again an hour after its deadline, until which its URLs
+  can still create the objects anew.
 - Due `deletions` are carried out. A row stays until S3 has confirmed.
 
 Because every S3 delete goes through the queue and the queue is written in
@@ -367,8 +406,9 @@ left in `verifying` return to `pending`.
 ### 7.4 iroh
 
 go-iroh v0.3.0. The endpoint is bound with the server key and the default
-relays, waits to come online, advertises its interface addresses, publishes
-itself through pkarr and answers mDNS, as `amber-serve` in transport-iroh
+relays, waits to come online (15 seconds at most; then it warns and serves
+with what it has), advertises its interface addresses, publishes itself
+through pkarr and answers mDNS, as `amber-serve` in transport-iroh
 does. The endpoint ID is logged at start. Clients need nothing else.
 
 ### 7.5 Command
@@ -389,9 +429,18 @@ wins when both are set.
 | `--url-ttl D` | `JACCARD_URL_TTL` | `1h` |
 | `--part-size N` | `JACCARD_PART_SIZE` | `64MiB` |
 | `--verify-jobs N` | `JACCARD_VERIFY_JOBS` | `2` |
+| `--max-pack-size N` | `JACCARD_MAX_PACK_SIZE` | `16GiB` |
+
+The two durations are lifetimes of pre-signed URLs and have to lie between
+one second and seven days. The scratch space a server needs is
+`--max-pack-size` times `--verify-jobs`.
 
 Credentials come from the SDK's default chain, which reads the usual
 `AWS_*` variables.
+
+When the admin address is on loopback, the page refuses requests whose
+`Host` is not a loopback address or `localhost`, so that a web page from
+elsewhere cannot read the API by pointing its own name at 127.0.0.1.
 
 ## 8. Statistics and the admin page
 
@@ -550,6 +599,11 @@ one server on a bucket; more than one level of parents.
 ## 13. Known limits
 
 - Access is open, so anyone who learns the endpoint ID can fill the bucket.
+- The service behind the bucket has to honor `If-None-Match: *` on PUT (AWS
+  S3 does). On one that ignores it, a client could replace an object after
+  the server verified it.
+- A reference whose pack would be larger than `--max-pack-size`
+  uncompressed cannot be pushed.
 - Every base pack costs a links object in the bucket, about 8 bytes per
   object plus 4 per link, and a patch push downloads its parent's.
 - The database is the only record of refs and of which pack leans on which.

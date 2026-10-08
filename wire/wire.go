@@ -11,7 +11,7 @@
 //
 //	push-start   name, root, sketch              stored | candidates
 //	push-upload  name, root, parent, data_size,  stored | upload_id, deadline,
-//	             objects                         index_url, data_url | parts
+//	             objects, bytes                  index_url, data_url | parts
 //	push-commit  upload_id                       root
 //	pull         name                            root, packs
 //	list         prefix, after, limit            refs, more
@@ -33,6 +33,11 @@ const (
 	// MaxFrame bounds the body of a frame. The largest answer is the one to
 	// push-upload for a pack of 10,000 parts, a pre-signed URL each.
 	MaxFrame = 16 << 20
+	// MaxRequest bounds the body of a request, which is far smaller than an
+	// answer can be: the largest carries a sketch of 4096 keys. A server
+	// reads requests from anybody, and a frame is allocated on the word of
+	// its first four bytes.
+	MaxRequest = 1 << 20
 )
 
 // ErrFrameTooLarge is returned for a frame whose body exceeds MaxFrame,
@@ -80,10 +85,14 @@ type Request struct {
 	Parent   []byte   `cbor:"parent,omitempty"`
 	DataSize uint64   `cbor:"data_size,omitempty"`
 	Objects  uint64   `cbor:"objects,omitempty"`
-	UploadID string   `cbor:"upload_id,omitempty"`
-	Prefix   string   `cbor:"prefix,omitempty"`
-	After    string   `cbor:"after,omitempty"`
-	Limit    int      `cbor:"limit,omitempty"`
+	// Bytes is the uncompressed size of the pack's data: the sum of the
+	// lengths in its index. A server that takes no pack that large says so
+	// before anything is uploaded.
+	Bytes    uint64 `cbor:"bytes,omitempty"`
+	UploadID string `cbor:"upload_id,omitempty"`
+	Prefix   string `cbor:"prefix,omitempty"`
+	After    string `cbor:"after,omitempty"`
+	Limit    int    `cbor:"limit,omitempty"`
 }
 
 // Response is what a server answers.
@@ -189,13 +198,23 @@ func WriteFrame(w io.Writer, v any) error {
 // frame begins and io.ErrUnexpectedEOF when it ends inside one. A frame
 // above MaxFrame is refused without reading its body.
 func ReadFrame(r io.Reader, v any) error {
+	return readFrame(r, v, MaxFrame)
+}
+
+// ReadRequest reads one request, as ReadFrame does, and refuses a frame
+// above MaxRequest.
+func ReadRequest(r io.Reader, req *Request) error {
+	return readFrame(r, req, MaxRequest)
+}
+
+func readFrame(r io.Reader, v any, limit uint32) error {
 	var prefix [4]byte
 	if _, err := io.ReadFull(r, prefix[:]); err != nil {
 		return err
 	}
 	n := binary.BigEndian.Uint32(prefix[:])
-	if n > MaxFrame {
-		return fmt.Errorf("%w: %d bytes announced", ErrFrameTooLarge, n)
+	if n > limit {
+		return fmt.Errorf("%w: %d bytes announced, %d allowed", ErrFrameTooLarge, n, limit)
 	}
 	body := make([]byte, n)
 	if _, err := io.ReadFull(r, body); err != nil {

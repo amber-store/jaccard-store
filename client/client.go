@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/amber-store/core/key"
 	"github.com/amber-store/jaccard-store/wire"
@@ -35,6 +36,9 @@ type Opener interface {
 type Client struct {
 	conn Opener
 	http *http.Client
+	// retryWait is the pause before a part is sent a second time; it grows
+	// with every further attempt.
+	retryWait time.Duration
 }
 
 // New returns a client that sends its requests over conn and reaches the
@@ -44,7 +48,7 @@ func New(conn Opener, hc *http.Client) *Client {
 	if hc == nil {
 		hc = &http.Client{}
 	}
-	return &Client{conn: conn, http: hc}
+	return &Client{conn: conn, http: hc, retryWait: time.Second}
 }
 
 // call sends one request and returns the answer. A refusal comes back as
@@ -106,16 +110,20 @@ func (c *Client) List(ctx context.Context, prefix string) ([]Ref, error) {
 			return nil, err
 		}
 		for _, r := range resp.Refs {
+			// A page that does not move on would be asked for forever.
+			if r.Name <= after {
+				return nil, fmt.Errorf("list: the server's references are not in order at %q", r.Name)
+			}
 			root, err := key.Parse(r.Root)
 			if err != nil {
 				return nil, fmt.Errorf("list: reference %q: %w", r.Name, err)
 			}
 			refs = append(refs, Ref{Name: r.Name, Root: root})
+			after = r.Name
 		}
 		if !resp.More || len(resp.Refs) == 0 {
 			return refs, nil
 		}
-		after = resp.Refs[len(resp.Refs)-1].Name
 	}
 }
 

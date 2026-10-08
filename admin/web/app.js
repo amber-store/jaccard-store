@@ -134,15 +134,19 @@ async function refs() {
     { title: "Updated", cell: (r) => [when(r.updated_at), h("div", { class: "sub key", title: r.updated_by }, short(r.updated_by))] },
   ];
   const body = h("div");
+  let asked = 0;
   async function show() {
     const prefix = filter.value;
+    // The answer to an earlier prefix can come after the answer to a later
+    // one; only the last one asked for is shown.
+    const turn = ++asked;
     const list = paged(columns, async (after) => {
       const q = new URLSearchParams({ prefix, after, limit: PAGE });
       const page = await api(`api/refs?${q}`);
       return { rows: page.refs, more: page.more };
     }, (r) => r.name, prefix ? "No reference has a name starting with that." : "The store holds no references yet.");
     await list.next();
-    body.replaceChildren(list.holder);
+    if (turn === asked) body.replaceChildren(list.holder);
   }
   let timer;
   filter.addEventListener("input", () => {

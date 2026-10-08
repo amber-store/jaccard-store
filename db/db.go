@@ -43,6 +43,9 @@ var (
 	// ErrBusy is returned by BeginVerify for an upload that is being
 	// verified already.
 	ErrBusy = errors.New("db: upload is being verified")
+	// ErrUnverified is returned by CommitUpload when it is given nothing
+	// that was verified and the upload's root has no pack to fall back on.
+	ErrUnverified = errors.New("db: the upload was not verified")
 	// ErrParentGone is returned by CreateUpload when the parent it names is
 	// not the root of a base pack.
 	ErrParentGone = errors.New("db: parent is not a base pack")

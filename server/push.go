@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"math"
 
 	"github.com/amber-store/core/key"
 	"github.com/amber-store/core/reference"
@@ -128,8 +127,11 @@ func (s *Server) pushUpload(ctx context.Context, remote string, req wire.Request
 	if req.Objects > packfile.MaxEntries {
 		return wire.Errorf(wire.CodeBadRequest, "objects: %d is more than a pack holds", req.Objects)
 	}
-	if req.DataSize > math.MaxInt64 {
-		return wire.Errorf(wire.CodeBadRequest, "data_size: %d is out of range", req.DataSize)
+	if req.DataSize > maxDataSize {
+		return wire.Errorf(wire.CodeBadRequest, "data_size: %d bytes is more than an object of the bucket holds", req.DataSize)
+	}
+	if req.Bytes > s.maxPackBytes {
+		return wire.Errorf(wire.CodeBadRequest, "bytes: a pack of %d bytes is above this server's limit of %d", req.Bytes, s.maxPackBytes)
 	}
 
 	now := s.now()
@@ -206,10 +208,15 @@ func (s *Server) pushUpload(ctx context.Context, remote string, req wire.Request
 }
 
 // partSizeFor returns the part size for data of size bytes: the configured
-// one, grown in whole mebibytes until maxParts parts are enough.
+// one, grown in whole mebibytes until maxParts parts are enough. size is at
+// most maxDataSize, so nothing here overflows.
 func partSizeFor(size, configured int64) int64 {
 	part := configured
-	if need := (size + maxParts - 1) / maxParts; need > part {
+	need := size / maxParts
+	if size%maxParts != 0 {
+		need++
+	}
+	if need > part {
 		const mib = 1 << 20
 		part = (need + mib - 1) / mib * mib
 	}

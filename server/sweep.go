@@ -10,12 +10,12 @@ import (
 const sweepBatch = 256
 
 // Sweep does one round of housekeeping: uploads past their deadline are
-// forgotten and their objects queued for deletion, and the deletions that
-// are due are carried out. A deletion the bucket did not confirm stays in
+// forgotten and their objects queued for deletion (twice: see db.Straggler),
+// and the deletions that are due are carried out. A deletion the bucket did not confirm stays in
 // the queue for the next round; Sweep reports those failures.
 func (s *Server) Sweep(ctx context.Context) error {
 	now := s.now()
-	expired, err := s.db.ExpireUploads(ctx, now, now.Add(straggler), s.collectAt(now))
+	expired, err := s.db.ExpireUploads(ctx, now, s.collectAt(now))
 	if err != nil {
 		return err
 	}

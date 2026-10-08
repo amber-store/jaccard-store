@@ -55,35 +55,66 @@ func (s *Server) pushCommit(ctx context.Context, remote string, req wire.Request
 		return wire.Errorf(wire.CodeUnknownUpload, "upload %s has expired", u.ID)
 	}
 
-	var v db.Verified
+	// A root that has a pack already needs no second one: the upload is
+	// redundant and is committed with nothing verified. That pack can be
+	// collected before the commit lands, though; CommitUpload says so, and
+	// the upload is then verified after all. An unverified upload is never
+	// recorded.
+	var v *db.Verified
 	if _, err := s.db.PackByRoot(ctx, u.Root); errors.Is(err, db.ErrNotFound) {
-		v, err = s.verifyUpload(ctx, u)
-		var bad *malformed
-		switch {
-		case errors.As(err, &bad):
-			now := s.now()
-			if err := s.db.FailUpload(context.WithoutCancel(ctx), u.ID, now, s.collectAt(now)); err != nil {
-				return s.internal("discarding a malformed upload", err)
-			}
-			s.log.Info("malformed pack refused", "upload", u.ID, "root", u.Root, "remote", remote, "reason", bad.reason)
-			return wire.Errorf(wire.CodeMalformedPack, "%s", bad.reason)
-		case err != nil:
-			handBack()
-			return s.internal("verifying the pack", err)
+		if v, err = s.verified(ctx, remote, u); err != nil {
+			return s.refuse(ctx, u, handBack, err)
 		}
 	} else if err != nil {
 		handBack()
 		return s.internal("looking the root up", err)
 	}
-	// Either the pack is verified, or the root got a pack in the meantime
-	// and the upload is redundant: CommitUpload tells the two apart.
-	now = s.now()
-	pack, err := s.db.CommitUpload(context.WithoutCancel(ctx), u.ID, v, now, s.collectAt(now))
-	if err != nil {
-		handBack()
-		return s.internal("recording the pack", err)
+	for {
+		now = s.now()
+		pack, err := s.db.CommitUpload(context.WithoutCancel(ctx), u.ID, v, now, s.collectAt(now))
+		if errors.Is(err, db.ErrUnverified) && v == nil {
+			if v, err = s.verified(ctx, remote, u); err != nil {
+				return s.refuse(ctx, u, handBack, err)
+			}
+			continue
+		}
+		if err != nil {
+			handBack()
+			return s.internal("recording the pack", err)
+		}
+		return wire.Response{Root: pack.Root[:]}
 	}
-	return wire.Response{Root: pack.Root[:]}
+}
+
+// verified verifies the upload u and returns what it found.
+func (s *Server) verified(ctx context.Context, remote string, u db.Upload) (*db.Verified, error) {
+	v, err := s.verifyUpload(ctx, u)
+	if err != nil {
+		var bad *malformed
+		if errors.As(err, &bad) {
+			s.log.Info("malformed pack refused", "upload", u.ID, "root", u.Root, "remote", remote, "reason", bad.reason)
+		}
+		return nil, err
+	}
+	return &v, nil
+}
+
+// refuse answers for an upload whose verification ended with err. A pack
+// that is malformed is discarded for good; if the verification could not
+// be made, or the discarding fails, the upload goes back to pending, where
+// a commit can be tried again and the sweeper finds it at its deadline.
+func (s *Server) refuse(ctx context.Context, u db.Upload, handBack func(), err error) wire.Response {
+	var bad *malformed
+	if !errors.As(err, &bad) {
+		handBack()
+		return s.internal("verifying the pack", err)
+	}
+	now := s.now()
+	if err := s.db.FailUpload(context.WithoutCancel(ctx), u.ID, now, s.collectAt(now)); err != nil {
+		handBack()
+		return s.internal("discarding a malformed upload", err)
+	}
+	return wire.Errorf(wire.CodeMalformedPack, "%s", bad.reason)
 }
 
 // verifyUpload checks the pack of u as the specification's section on
@@ -116,6 +147,11 @@ func (s *Server) verifyUpload(ctx context.Context, u db.Upload) (db.Verified, er
 	}
 	if int64(index.Len()) != u.Objects {
 		return db.Verified{}, malformedf("index: %d entries, %d were announced", index.Len(), u.Objects)
+	}
+	// Before a byte of the data is fetched: the index is all it takes to
+	// announce more than the scratch space holds.
+	if index.DataSize() > s.maxPackBytes {
+		return db.Verified{}, malformedf("index: a pack of %d bytes is above this server's limit of %d", index.DataSize(), s.maxPackBytes)
 	}
 
 	data, err := s.expand(ctx, u, index)

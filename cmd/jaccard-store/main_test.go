@@ -248,3 +248,39 @@ func TestArgumentCounts(t *testing.T) {
 		}
 	}
 }
+
+func TestPullRefusesALocalNameBeforeItFetches(t *testing.T) {
+	dir, root := storeWithRef(t, "source")
+	f := &fakeRemote{pullRoot: root}
+	f.settings = settings{}
+	_, err := run(t, f, nil, "--store", dir, "pull", "--as", "", "remote/name")
+	if err != nil {
+		t.Fatalf("an empty --as means the name itself: %v", err)
+	}
+	fetched := false
+	app := newApp(io.Discard, io.Discard, func(_ context.Context, s settings) (remote, error) {
+		fetched = true
+		return f, nil
+	})
+	bad := strings.Repeat("x", 4096)
+	if err := app.Run([]string{"jaccard-store", "--store", dir, "pull", "--as", bad, "remote/name"}); err == nil {
+		t.Fatal("a local name of 4096 bytes was accepted")
+	}
+	if fetched {
+		t.Fatal("the server was dialed for a pull that could not end well")
+	}
+}
+
+func TestMinDedupMustBeAFraction(t *testing.T) {
+	dir, _ := storeWithRef(t, "local")
+	for _, v := range []string{"-0.1", "NaN"} {
+		f := &fakeRemote{}
+		if _, err := run(t, f, nil, "--store", dir, "push", "--min-dedup", v, "local"); err == nil || len(f.pushed) != 0 {
+			t.Errorf("--min-dedup %s: err %v, pushed %v", v, err, f.pushed)
+		}
+	}
+	f := &fakeRemote{}
+	if _, err := run(t, f, nil, "--store", dir, "push", "--min-dedup", "0", "local"); err != nil || f.opts.MinDedup != 0 {
+		t.Errorf("--min-dedup 0: %v, %+v", err, f.opts)
+	}
+}

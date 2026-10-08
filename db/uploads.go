@@ -127,19 +127,31 @@ func (d *DB) CreateUpload(ctx context.Context, u Upload, parent *key.Key) (Uploa
 	return u, nil
 }
 
+// Straggler is how long after an upload's deadline its bucket keys are
+// deleted a second time. The URLs an upload was given stay valid until its
+// deadline whatever becomes of the upload, and a PUT that began before the
+// deadline can land after it: an object written after the first deletion
+// would otherwise stay in the bucket with nothing left that knows of it.
+const Straggler = time.Hour
+
 // CommitUpload records the verified pack of an upload, points the upload's
-// ref at it and forgets the upload. A base pack, which is one without a
-// parent, comes with its sketch and keeps the upload's links key; a patch
-// pack comes without a sketch and has no links: nothing was written under
-// the upload's links key, and nothing is recorded of it.
+// ref at it and forgets the upload. v is what the verification found. A
+// base pack, which is one without a parent, comes with its sketch and keeps
+// the upload's links key; a patch pack comes without a sketch and has no
+// links: nothing was written under the upload's links key, and nothing is
+// recorded of it.
 //
-// If the root has a pack by now, nothing is recorded: the upload's keys and
-// its multipart upload are queued for deletion at now and the ref is pointed
-// at the pack there is. Either way CommitUpload returns the pack the ref
-// points at, and collects what the ref left; collected keys are queued for
-// deletion not before deleteAt. The error is ErrNotFound when there is no
-// such upload.
-func (d *DB) CommitUpload(ctx context.Context, id string, v Verified, now, deleteAt time.Time) (p Pack, err error) {
+// If the root has a pack by now, nothing is recorded and v is not looked
+// at: the upload's keys and its multipart upload are queued for deletion
+// and the ref is pointed at the pack there is. A caller that saw such a pack
+// and verified nothing passes a nil v; should the pack be gone again by the
+// time of the commit, the error is ErrUnverified, nothing has changed, and
+// the caller verifies after all.
+//
+// CommitUpload returns the pack the ref points at, and collects what the
+// ref left; collected keys are queued for deletion not before deleteAt. The
+// error is ErrNotFound when there is no such upload.
+func (d *DB) CommitUpload(ctx context.Context, id string, v *Verified, now, deleteAt time.Time) (p Pack, err error) {
 	err = d.write(ctx, func(q *dbq.Queries) error {
 		u, err := q.UploadByID(ctx, id)
 		if err != nil {
@@ -154,7 +166,10 @@ func (d *DB) CommitUpload(ctx context.Context, id string, v Verified, now, delet
 				return err
 			}
 		case notFound(err) == ErrNotFound:
-			if packID, err = insertPack(ctx, q, u, v, now); err != nil {
+			if v == nil {
+				return ErrUnverified
+			}
+			if packID, err = insertPack(ctx, q, u, *v, now); err != nil {
 				return err
 			}
 			if err := q.DeleteUpload(ctx, u.ID); err != nil {
@@ -221,9 +236,11 @@ func insertPack(ctx context.Context, q *dbq.Queries, u dbq.Upload, v Verified, n
 }
 
 // discard forgets the upload u and queues what it owns in the bucket for
-// deletion at now. The abort of its multipart upload is queued first: once
-// the upload is aborted it cannot be completed any more, so the delete that
-// follows it is the last word on the data.
+// deletion at now, and once more Straggler after its deadline (or after now,
+// if that is later), when no URL of the upload can write any more. The abort
+// of its multipart upload is queued first: once the upload is aborted it
+// cannot be completed any more, so the delete that follows it is the last
+// word on the data.
 func discard(ctx context.Context, q *dbq.Queries, u dbq.Upload, now time.Time) error {
 	if err := q.DeleteUpload(ctx, u.ID); err != nil {
 		return err
@@ -238,7 +255,14 @@ func discard(ctx context.Context, q *dbq.Queries, u dbq.Upload, now time.Time) e
 			return err
 		}
 	}
-	return queue(ctx, q, now, u.DataKey, u.IndexKey, u.LinksKey)
+	if err := queue(ctx, q, now, u.DataKey, u.IndexKey, u.LinksKey); err != nil {
+		return err
+	}
+	again := timeOf(u.Deadline)
+	if now.After(again) {
+		again = now
+	}
+	return queue(ctx, q, again.Add(Straggler), u.DataKey, u.IndexKey, u.LinksKey)
 }
 
 // DueDeletions returns at most limit queued deletions whose time has come at
@@ -262,9 +286,10 @@ func (d *DB) DueDeletions(ctx context.Context, now time.Time, limit int) ([]Dele
 }
 
 // FailUpload forgets an upload, queues its three keys and its multipart
-// upload for deletion at now, and collects: the upload may have been the
-// last hold on its parent. Collected keys are queued for deletion not before
-// deleteAt. The error is ErrNotFound when there is no such upload.
+// upload for deletion at now and its keys once more Straggler after its
+// deadline, and collects: the upload may have been the last hold on its
+// parent. Collected keys are queued for deletion not before deleteAt. The
+// error is ErrNotFound when there is no such upload.
 func (d *DB) FailUpload(ctx context.Context, id string, now, deleteAt time.Time) error {
 	return d.write(ctx, func(q *dbq.Queries) error {
 		u, err := q.UploadByID(ctx, id)
@@ -370,10 +395,9 @@ func setState(ctx context.Context, q *dbq.Queries, id, state string) error {
 }
 
 // ExpireUploads fails every pending upload whose deadline is before now, as
-// FailUpload does, and queues its three keys a second time at again: a PUT
-// that began before the deadline can land after the first deletion. Uploads
-// being verified are left alone. It returns how many uploads it failed.
-func (d *DB) ExpireUploads(ctx context.Context, now, again, deleteAt time.Time) (int, error) {
+// FailUpload does. Uploads being verified are left alone. It returns how
+// many uploads it failed.
+func (d *DB) ExpireUploads(ctx context.Context, now, deleteAt time.Time) (int, error) {
 	expired := 0
 	err := d.write(ctx, func(q *dbq.Queries) error {
 		rows, err := q.ExpiredUploads(ctx, now.Unix())
@@ -383,9 +407,6 @@ func (d *DB) ExpireUploads(ctx context.Context, now, again, deleteAt time.Time) 
 		var parents []int64
 		for _, u := range rows {
 			if err := discard(ctx, q, u, now); err != nil {
-				return err
-			}
-			if err := queue(ctx, q, again, u.DataKey, u.IndexKey, u.LinksKey); err != nil {
 				return err
 			}
 			parents = append(parents, u.ParentID.Int64)

@@ -633,8 +633,8 @@ func TestAMalformedUploadIsRefusedAndRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	put(t, up.IndexURL, index.Encode())
-	put(t, up.DataURL, data.Bytes())
+	create(t, up.IndexURL, index.Encode())
+	create(t, up.DataURL, data.Bytes())
 
 	// Nobody but the endpoint that opened the upload may commit it.
 	eve := w.peer("eve")
@@ -654,8 +654,16 @@ func TestAMalformedUploadIsRefusedAndRemoved(t *testing.T) {
 			t.Errorf("%s is still in the bucket", objectKey)
 		}
 	}
-	if st := w.stats(); st.BasePacks != 0 || st.Uploads != 0 || st.Deletions != 0 {
+	// The keys are cleared once more after the upload's deadline: its URLs
+	// work until then, whatever became of the upload.
+	if st := w.stats(); st.BasePacks != 0 || st.Uploads != 0 || st.Deletions != 3 {
 		t.Fatalf("the store counts %+v", st)
+	}
+	create(t, up.DataURL, data.Bytes())
+	w.clock.Advance(time.Hour + db.Straggler)
+	w.sweep()
+	if st := w.stats(); st.Deletions != 0 || w.present(u.DataKey) {
+		t.Fatalf("after the deadline the store counts %+v and the data put back is present: %v", st, w.present(u.DataKey))
 	}
 
 	// The same client, honest this time, is served.
@@ -676,8 +684,8 @@ func TestAnAbandonedUploadLeavesTheBucket(t *testing.T) {
 	if single.Error != nil || single.DataURL == "" {
 		t.Fatalf("push-upload answered %+v", single)
 	}
-	put(t, single.IndexURL, bytes.Repeat([]byte{1}, 104))
-	put(t, single.DataURL, bytes.Repeat([]byte{2}, 500))
+	create(t, single.IndexURL, bytes.Repeat([]byte{1}, 104))
+	create(t, single.DataURL, bytes.Repeat([]byte{2}, 500))
 	ua, err := w.db.UploadByID(w.ctx, single.UploadID)
 	if err != nil {
 		t.Fatal(err)
@@ -733,6 +741,26 @@ func put(t *testing.T, url string, body []byte) {
 	t.Helper()
 	if status := putStatus(t, url, body); status != http.StatusOK {
 		t.Fatalf("PUT answered %d", status)
+	}
+}
+
+// create PUTs an index, or data in one piece, as a client has to: on the
+// condition that the object is not there yet.
+func create(t *testing.T, url string, body []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("If-None-Match", bucket.PutCondition)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	io.Copy(io.Discard, res.Body)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("PUT answered %d", res.StatusCode)
 	}
 }
 

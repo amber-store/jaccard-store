@@ -23,6 +23,7 @@ import (
 	"syscall"
 
 	"github.com/amber-store/core/key"
+	"github.com/amber-store/core/reference"
 	"github.com/amber-store/jaccard-store/client"
 	"github.com/amber-store/jaccard-store/node"
 	"github.com/amber-store/jaccard-store/wire"
@@ -33,6 +34,13 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// The first signal ends the context and the command winds down; from
+	// then on signals are the system's again, so a second one ends the
+	// process at once.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 	if err := newApp(os.Stdout, os.Stderr, dial).RunContext(ctx, os.Args); err != nil {
 		fmt.Fprintln(os.Stderr, "jaccard-store:", err)
 		os.Exit(1)
@@ -144,6 +152,10 @@ func runPush(c *cli.Context, connect dialer) error {
 	if name == "" {
 		name = ref
 	}
+	minDedup := c.Float64("min-dedup")
+	if !(minDedup >= 0) { // which a NaN is not either
+		return fmt.Errorf("--min-dedup: %v is not a fraction: want 0 or more", minDedup)
+	}
 	s := readSettings(c)
 	store, err := openStore(s.store)
 	if err != nil {
@@ -159,7 +171,7 @@ func runPush(c *cli.Context, connect dialer) error {
 		return err
 	}
 	defer server.Close()
-	res, err := server.Push(c.Context, store, name, root, client.PushOptions{MinDedup: c.Float64("min-dedup")})
+	res, err := server.Push(c.Context, store, name, root, client.PushOptions{MinDedup: minDedup})
 	if err != nil {
 		return err
 	}
@@ -184,6 +196,11 @@ func runPull(c *cli.Context, connect dialer) error {
 	ref := c.String("as")
 	if ref == "" {
 		ref = name
+	}
+	// Before anything is fetched: a name the store will not take should
+	// not cost a download.
+	if err := reference.ValidateName(ref); err != nil {
+		return fmt.Errorf("local reference %q: %w", ref, err)
 	}
 	s := readSettings(c)
 	store, err := openStore(s.store)

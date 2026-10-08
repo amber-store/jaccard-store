@@ -3,6 +3,8 @@ package client
 import (
 	"context"
 	"fmt"
+	"io"
+	"math"
 
 	"github.com/amber-store/core/fstree"
 	"github.com/amber-store/core/key"
@@ -38,6 +40,11 @@ func (c *Client) Pull(ctx context.Context, objects *packstore.Store, name string
 	root, err := key.Parse(resp.Root)
 	if err != nil {
 		return PullResult{}, fmt.Errorf("pull: the server's root: %w", err)
+	}
+	// A reference is read from its pack and that pack's parent, nothing
+	// else: more packs than that are not the answer to a pull.
+	if len(resp.Packs) == 0 || len(resp.Packs) > 2 {
+		return PullResult{}, fmt.Errorf("pull: the server named %d packs for %q", len(resp.Packs), name)
 	}
 	res := PullResult{Root: root}
 	for _, p := range resp.Packs {
@@ -76,12 +83,21 @@ func (c *Client) importPack(ctx context.Context, objects *packstore.Store, p wir
 	if err != nil {
 		return fmt.Errorf("index: %w", err)
 	}
+	// The index decides how much is written to the store, so it is held
+	// to what the server said of the pack before any of it is.
+	if uint64(index.Len()) != p.Objects || index.DataSize() != p.Bytes {
+		return fmt.Errorf("index: %d objects of %d bytes, the server announced %d of %d",
+			index.Len(), index.DataSize(), p.Objects, p.Bytes)
+	}
 	body, err := c.get(ctx, "data", p.DataURL)
 	if err != nil {
 		return err
 	}
 	defer body.Close()
-	for o, err := range packfile.Objects(index, body) {
+	// No more of the body is read than the data is said to be, and one
+	// byte, which a longer body gives away.
+	data := io.LimitReader(body, int64(min(p.DataSize, math.MaxInt64-1))+1)
+	for o, err := range packfile.Objects(index, data) {
 		if err != nil {
 			return fmt.Errorf("data: %w", orCause(ctx, err))
 		}

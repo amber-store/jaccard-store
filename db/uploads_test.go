@@ -245,7 +245,7 @@ func TestExpireUploads(t *testing.T) {
 	roots := testKeys(t, "root", 6)
 	base := addBase(t, d, "base", roots[0], sketchOf(roots[0]))
 	now := t0.Add(2 * time.Hour)
-	again := now.Add(time.Hour)
+	again := now.Add(Straggler) // the deadlines are past, so the second deletion counts from now
 	deleteAt := now.Add(30 * time.Minute)
 	at := func(id string, root int, deadline time.Time) Upload {
 		u := upload(id, id, roots[root])
@@ -271,7 +271,7 @@ func TestExpireUploads(t *testing.T) {
 	}
 	wantPack(t, d, roots[0])
 
-	n, err := d.ExpireUploads(ctx, now, again, deleteAt)
+	n, err := d.ExpireUploads(ctx, now, deleteAt)
 	if err != nil || n != 2 {
 		t.Fatalf("ExpireUploads: %d, %v; want 2", n, err)
 	}
@@ -301,7 +301,7 @@ func TestExpireUploads(t *testing.T) {
 		t.Fatalf("the second deletions are due before their time: %q", got)
 	}
 
-	if n, err := d.ExpireUploads(ctx, now, again, deleteAt); err != nil || n != 0 {
+	if n, err := d.ExpireUploads(ctx, now, deleteAt); err != nil || n != 0 {
 		t.Fatalf("a second ExpireUploads: %d, %v; want 0", n, err)
 	}
 }
@@ -359,8 +359,69 @@ func TestDeletionsComeDueAndAreDone(t *testing.T) {
 	if err := d.DoneDeletion(ctx, due[0].ID); err != nil {
 		t.Fatalf("a deletion done twice: %v", err)
 	}
-	if s, err := d.Stats(ctx); err != nil || s.Deletions != 5 {
-		t.Fatalf("Stats: %+v, %v; want 5 deletions", s, err)
+	// Each upload's keys are queued a second time, for when its URLs can
+	// write no more: Straggler after the deadline, which is later than the
+	// failure here.
+	second := upload("a", "x", roots[0]).Deadline.Add(Straggler)
+	wantQueued(t, d, second.Add(-time.Second), "b.idx", "b.links", "a.data", "a.idx", "a.links")
+	if got := queued(t, d, second); len(got) != 5+6 {
+		t.Fatalf("due after the second round: %q", got)
+	}
+	if s, err := d.Stats(ctx); err != nil || s.Deletions != 11 {
+		t.Fatalf("Stats: %+v, %v; want 11 deletions", s, err)
+	}
+}
+
+func TestAnUploadFailedAfterItsDeadlineIsClearedAgainFromThen(t *testing.T) {
+	d := open(t)
+	roots := testKeys(t, "root", 1)
+	u := upload("late", "x", roots[0])
+	mustCreate(t, d, u)
+	failedAt := u.Deadline.Add(10 * time.Minute)
+	if err := d.FailUpload(ctx, "late", failedAt, later); err != nil {
+		t.Fatal(err)
+	}
+	wantQueued(t, d, failedAt.Add(Straggler-time.Second), keysOf("late")...)
+	if got := queued(t, d, failedAt.Add(Straggler)); len(got) != 6 {
+		t.Fatalf("due a straggler's time after the failure: %q", got)
+	}
+}
+
+func TestCommitUploadWithNothingVerified(t *testing.T) {
+	d := open(t)
+	roots := testKeys(t, "root", 2)
+	base := addBase(t, d, "base", roots[0], sketchOf(roots[0]))
+
+	// A patch upload: the kind a missing sketch does not give away.
+	if _, err := d.CreateUpload(ctx, upload("unverified", "x", roots[1]), &roots[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.CommitUpload(ctx, "unverified", nil, t0, later); !errors.Is(err, ErrUnverified) {
+		t.Fatalf("CommitUpload of an unverified upload whose root has no pack: %v, want ErrUnverified", err)
+	}
+	wantNoPack(t, d, roots[1])
+	wantNotFound2(t, d, "x")
+	if u, err := d.UploadByID(ctx, "unverified"); err != nil || u.State != StatePending {
+		t.Fatalf("the upload after the refusal: %+v, %v", u, err)
+	}
+	wantQueued(t, d, later.Add(24*time.Hour))
+
+	// The same call is fine when the root has a pack to point the ref at.
+	mustCreate(t, d, upload("redundant", "again", roots[0]))
+	got, err := d.CommitUpload(ctx, "redundant", nil, t0, later)
+	if err != nil || got != base {
+		t.Fatalf("CommitUpload onto an existing pack: %+v, %v", got, err)
+	}
+	if r, err := d.Ref(ctx, "again"); err != nil || r.PackID != base.ID {
+		t.Fatalf("ref = %+v, %v", r, err)
+	}
+}
+
+// wantNotFound2 fails the test if there is a ref called name.
+func wantNotFound2(t *testing.T, d *DB, name string) {
+	t.Helper()
+	if _, err := d.Ref(ctx, name); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ref %q: %v, want ErrNotFound", name, err)
 	}
 }
 
