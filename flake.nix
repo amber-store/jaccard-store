@@ -50,6 +50,16 @@
 
           packages = with pkgs; [ go sqlc self.packages.${system}.default ];
         };
+
+        # The same tools without the built commands. The default shell
+        # cannot be entered while the module does not resolve, for example
+        # after a `go get` that left go.sum behind; this one can, to run
+        # `go mod tidy`. It needs no evaluation option.
+        bare = pkgs.mkShell {
+          hardeningDisable = [ "all" ];
+
+          packages = with pkgs; [ go sqlc ];
+        };
       });
     };
 }

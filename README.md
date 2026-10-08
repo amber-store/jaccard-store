@@ -146,10 +146,41 @@ go test ./...
 (cd db && go generate)   # after changing db/queries or db/migrations
 ```
 
-The end-to-end tests in `e2e/` run a server and its clients in one process,
-over real iroh endpoints on loopback and an S3 in memory. Nothing in the
-test suite needs the network, except `TestOnline` in `node/`, which runs
-only with `JACCARD_TEST_ONLINE=1`.
+The default shell cannot be entered while the Go module does not resolve,
+because building the commands is part of it: after a `go get` that left
+`go.sum` behind, for example. `nix develop .#bare` has `go` and `sqlc`
+without the commands and needs no option; run `go mod tidy` there.
+
+### End-to-end tests
+
+The tests in `e2e/` run a server and its clients in one process, over real
+iroh endpoints on loopback, against two kinds of bucket:
+
+- an S3 in memory, which is always there and checks no signature;
+- [RustFS](https://github.com/rustfs/rustfs) in a container, started with
+  [testcontainers](https://golang.testcontainers.org/). It checks what S3
+  checks: the signature of every request, the headers that were signed,
+  when a URL expires, and that no part of a multipart upload but the last
+  is under 5 MiB.
+
+Every scenario runs against both. Three tests run against the container
+alone, because they are about what only a real service enforces: that an
+upload URL cannot be used without its create-only condition or after its
+deadline, and that the URL completing a multipart upload, which is signed
+by hand, completes that upload and no other.
+
+The container tests need Docker and pull `rustfs/rustfs:1.0.1` once. They
+are skipped where there is no Docker and with `go test -short`.
+
+| variable | meaning |
+| --- | --- |
+| `JACCARD_TEST_RUSTFS_IMAGE` | another RustFS image than `rustfs/rustfs:1.0.1` |
+| `JACCARD_TEST_MINIO_IMAGE` | run everything against MinIO as well, from this image |
+| `JACCARD_TEST_ONLINE=1` | run `TestOnline` in `node/`, which reaches iroh's relays |
+
+MinIO is not run by default because its own images have left the public
+registries, so there is none to pin. A build by somebody else works, for
+example `JACCARD_TEST_MINIO_IMAGE=cgr.dev/chainguard/minio:latest`.
 
 ## License
 

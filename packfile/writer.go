@@ -14,6 +14,11 @@ import (
 // zstd stream and keeps the index that stream implies. A pack to which no
 // bytes were added writes no data at all. It is not safe for concurrent use.
 type Writer struct {
+	data io.Writer
+	// enc is started with the first byte. What an encoder that was given
+	// nothing writes when it is closed has differed between releases of
+	// the zstd package, from nothing to an empty frame; a pack without
+	// bytes is to be no data whatever the release, so no encoder is asked.
 	enc     *zstd.Encoder
 	entries []Entry
 	bytes   uint64
@@ -22,11 +27,7 @@ type Writer struct {
 
 // NewWriter starts a pack whose compressed data goes to data.
 func NewWriter(data io.Writer) (*Writer, error) {
-	enc, err := zstd.NewWriter(data)
-	if err != nil {
-		return nil, fmt.Errorf("packfile: starting the zstd stream: %w", err)
-	}
-	return &Writer{enc: enc}, nil
+	return &Writer{data: data}, nil
 }
 
 // Add appends one object, k and its serialized bytes, to the stream. It
@@ -47,8 +48,17 @@ func (w *Writer) Add(k key.Key, object []byte) error {
 	if len(w.entries) == MaxEntries {
 		return fmt.Errorf("%w: a pack holds at most %d objects", ErrMalformed, MaxEntries)
 	}
-	if _, err := w.enc.Write(object); err != nil {
-		return err
+	if len(object) > 0 {
+		if w.enc == nil {
+			enc, err := zstd.NewWriter(w.data)
+			if err != nil {
+				return fmt.Errorf("packfile: starting the zstd stream: %w", err)
+			}
+			w.enc = enc
+		}
+		if _, err := w.enc.Write(object); err != nil {
+			return err
+		}
 	}
 	w.entries = append(w.entries, Entry{Key: k, Offset: w.bytes, Length: uint32(len(object))})
 	w.bytes += uint64(len(object))
@@ -69,8 +79,10 @@ func (w *Writer) Finish() (*Index, error) {
 		return nil, errors.New("packfile: Finish called twice")
 	}
 	w.done = true
-	if err := w.enc.Close(); err != nil {
-		return nil, err
+	if w.enc != nil {
+		if err := w.enc.Close(); err != nil {
+			return nil, err
+		}
 	}
 	return NewIndex(w.entries)
 }

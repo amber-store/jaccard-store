@@ -58,6 +58,35 @@ func (c *clock) Advance(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
+// backend is an S3 that the scenarios run against.
+type backend struct {
+	name string
+	// bucket returns a bucket of the test's own on the service. It skips
+	// the test when the service is not to be had.
+	bucket func(t *testing.T) *bucket.Bucket
+	// partSize is a part size the service completes a multipart upload
+	// with. S3 takes no part below 5 MiB but the last; the fake takes any.
+	partSize int64
+	// strict says that the service checks signatures, signed headers and
+	// expiry, as S3 does.
+	strict bool
+}
+
+// backends are the fake in memory, which is always there and checks no
+// signature, and RustFS in a container, which checks what S3 checks. TestMain
+// adds MinIO when an image for it is named.
+var backends = []backend{
+	{name: "fake", bucket: func(t *testing.T) *bucket.Bucket { return buckettest.New(t) }, partSize: 64 << 10},
+	{name: rustfs.name, bucket: rustfs.bucket, partSize: 5 << 20, strict: true},
+}
+
+// onEveryBucket runs a scenario against each backend in turn.
+func onEveryBucket(t *testing.T, scenario func(t *testing.T, s3 backend)) {
+	for _, b := range backends {
+		t.Run(b.name, func(t *testing.T) { scenario(t, b) })
+	}
+}
+
 // world is a server with its database and its bucket, reachable over iroh
 // on loopback.
 type world struct {
@@ -70,12 +99,12 @@ type world struct {
 	clock  *clock
 }
 
-func newWorld(t *testing.T, mutate func(*server.Config)) *world {
+func newWorld(t *testing.T, s3 backend, mutate func(*server.Config)) *world {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	t.Cleanup(cancel)
 	dir := t.TempDir()
-	w := &world{t: t, ctx: ctx, bucket: buckettest.New(t), clock: &clock{t: time.Unix(1_800_000_000, 0)}}
+	w := &world{t: t, ctx: ctx, bucket: s3.bucket(t), clock: &clock{t: time.Unix(1_800_000_000, 0)}}
 
 	var err error
 	if w.db, err = db.Open(filepath.Join(dir, "store.sqlite")); err != nil {
@@ -325,8 +354,10 @@ func unrelated() map[string][]byte {
 	}
 }
 
-func TestBaseThenPatchRoundTrip(t *testing.T) {
-	w := newWorld(t, nil)
+func TestBaseThenPatchRoundTrip(t *testing.T) { onEveryBucket(t, baseThenPatchRoundTrip) }
+
+func baseThenPatchRoundTrip(t *testing.T, s3 backend) {
+	w := newWorld(t, s3, nil)
 	alice, bob := w.peer("alice"), w.peer("bob")
 
 	v1 := alice.ingest(version1())
@@ -394,7 +425,11 @@ func TestBaseThenPatchRoundTrip(t *testing.T) {
 }
 
 func TestPullSkipsTheParentTheStoreAlreadyHolds(t *testing.T) {
-	w := newWorld(t, nil)
+	onEveryBucket(t, pullSkipsTheParentTheStoreAlreadyHolds)
+}
+
+func pullSkipsTheParentTheStoreAlreadyHolds(t *testing.T, s3 backend) {
+	w := newWorld(t, s3, nil)
 	alice, bob := w.peer("alice"), w.peer("bob")
 	v1 := alice.ingest(version1())
 	v2 := alice.ingest(version2())
@@ -415,7 +450,11 @@ func TestPullSkipsTheParentTheStoreAlreadyHolds(t *testing.T) {
 }
 
 func TestARootAlreadyStoredIsNotUploadedAgain(t *testing.T) {
-	w := newWorld(t, nil)
+	onEveryBucket(t, aRootAlreadyStoredIsNotUploadedAgain)
+}
+
+func aRootAlreadyStoredIsNotUploadedAgain(t *testing.T, s3 backend) {
+	w := newWorld(t, s3, nil)
 	alice, bob := w.peer("alice"), w.peer("bob")
 	v1 := alice.ingest(version1())
 	alice.push("v1", v1)
@@ -438,7 +477,11 @@ func TestARootAlreadyStoredIsNotUploadedAgain(t *testing.T) {
 }
 
 func TestAMovedRefLeavesItsOldPackToBeCollected(t *testing.T) {
-	w := newWorld(t, nil)
+	onEveryBucket(t, aMovedRefLeavesItsOldPackToBeCollected)
+}
+
+func aMovedRefLeavesItsOldPackToBeCollected(t *testing.T, s3 backend) {
+	w := newWorld(t, s3, nil)
 	alice, bob := w.peer("alice"), w.peer("bob")
 	old := alice.ingest(version1())
 	alice.push("moving", old)
@@ -482,17 +525,20 @@ func TestAMovedRefLeavesItsOldPackToBeCollected(t *testing.T) {
 	}
 }
 
-func TestALargePackGoesUpInParts(t *testing.T) {
-	const partSize = 64 << 10
-	w := newWorld(t, func(c *server.Config) { c.PartSize = partSize })
+func TestALargePackGoesUpInParts(t *testing.T) { onEveryBucket(t, aLargePackGoesUpInParts) }
+
+func aLargePackGoesUpInParts(t *testing.T, s3 backend) {
+	partSize := s3.partSize
+	w := newWorld(t, s3, func(c *server.Config) { c.PartSize = partSize })
 	alice, bob := w.peer("alice"), w.peer("bob")
+	// Two and a half parts of bytes that do not compress.
 	root := alice.ingest(map[string][]byte{
-		"blob.bin":  noise(1, 300<<10),
+		"blob.bin":  noise(1, int(partSize*5/2)),
 		"small.txt": []byte("beside it\n"),
 	})
 	res := alice.push("large", root)
-	if res.DataSize <= 4*partSize {
-		t.Fatalf("the pack is %d bytes, too small for the parts this test is about", res.DataSize)
+	if res.DataSize <= uint64(2*partSize) {
+		t.Fatalf("the pack is %d bytes, too small for the three parts this test is about", res.DataSize)
 	}
 	p := w.pack(root)
 	if size, err := w.bucket.Size(w.ctx, p.DataKey); err != nil || size != int64(res.DataSize) {
@@ -505,7 +551,11 @@ func TestALargePackGoesUpInParts(t *testing.T) {
 }
 
 func TestTwoClientsPushingOneRootAtOnce(t *testing.T) {
-	w := newWorld(t, nil)
+	onEveryBucket(t, twoClientsPushingOneRootAtOnce)
+}
+
+func twoClientsPushingOneRootAtOnce(t *testing.T, s3 backend) {
+	w := newWorld(t, s3, nil)
 	alice, bob := w.peer("alice"), w.peer("bob")
 	root := alice.ingest(version1())
 	if got := bob.ingest(version1()); got != root {
@@ -551,8 +601,10 @@ func TestTwoClientsPushingOneRootAtOnce(t *testing.T) {
 	sameTree(t, root, alice, carol)
 }
 
-func TestARefOfOneObject(t *testing.T) {
-	w := newWorld(t, nil)
+func TestARefOfOneObject(t *testing.T) { onEveryBucket(t, aRefOfOneObject) }
+
+func aRefOfOneObject(t *testing.T, s3 backend) {
+	w := newWorld(t, s3, nil)
 	alice, bob := w.peer("alice"), w.peer("bob")
 	blob, err := fstree.EncodeBlob([]byte("a reference that is one blob"))
 	if err != nil {
@@ -574,8 +626,10 @@ func TestARefOfOneObject(t *testing.T) {
 	}
 }
 
-func TestARefWhoseRootSitsInABasePack(t *testing.T) {
-	w := newWorld(t, nil)
+func TestARefWhoseRootSitsInABasePack(t *testing.T) { onEveryBucket(t, aRefWhoseRootSitsInABasePack) }
+
+func aRefWhoseRootSitsInABasePack(t *testing.T, s3 backend) {
+	w := newWorld(t, s3, nil)
 	alice, bob := w.peer("alice"), w.peer("bob")
 	whole := alice.ingest(version1())
 	alice.push("whole", whole)
@@ -600,7 +654,11 @@ func TestARefWhoseRootSitsInABasePack(t *testing.T) {
 }
 
 func TestAMalformedUploadIsRefusedAndRemoved(t *testing.T) {
-	w := newWorld(t, nil)
+	onEveryBucket(t, aMalformedUploadIsRefusedAndRemoved)
+}
+
+func aMalformedUploadIsRefusedAndRemoved(t *testing.T, s3 backend) {
+	w := newWorld(t, s3, nil)
 	mallory := w.peer("mallory")
 	root := mallory.ingest(version1())
 	keys := mallory.keys(root)
@@ -673,8 +731,12 @@ func TestAMalformedUploadIsRefusedAndRemoved(t *testing.T) {
 }
 
 func TestAnAbandonedUploadLeavesTheBucket(t *testing.T) {
+	onEveryBucket(t, anAbandonedUploadLeavesTheBucket)
+}
+
+func anAbandonedUploadLeavesTheBucket(t *testing.T, s3 backend) {
 	const partSize = 1000
-	w := newWorld(t, func(c *server.Config) { c.PartSize = partSize })
+	w := newWorld(t, s3, func(c *server.Config) { c.PartSize = partSize })
 	alice := w.peer("alice")
 	rootA := alice.ingest(version1())
 	rootB := alice.ingest(unrelated())
@@ -764,8 +826,10 @@ func create(t *testing.T, url string, body []byte) {
 	}
 }
 
-func TestNamesWithOddCharacters(t *testing.T) {
-	w := newWorld(t, nil)
+func TestNamesWithOddCharacters(t *testing.T) { onEveryBucket(t, namesWithOddCharacters) }
+
+func namesWithOddCharacters(t *testing.T, s3 backend) {
+	w := newWorld(t, s3, nil)
 	alice := w.peer("alice")
 	root := alice.ingest(version1())
 	names := []string{"100%/done", "a_b", "a%b", `back\slash`, "ünïcode/ref", "axb"}

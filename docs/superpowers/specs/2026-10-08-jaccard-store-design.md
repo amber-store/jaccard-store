@@ -590,7 +590,13 @@ Tests are written before the code they cover.
   refused and removed; the multipart path with a small part size; two
   clients pushing one root at once; a pull that skips the parent.
 - `admin`: the API through `httptest`.
-- One opt-in test against a real S3 endpoint named in the environment.
+- The same end-to-end cases against an S3 implementation in a container
+  (RustFS, through testcontainers; MinIO too when an image for it is
+  named). Unlike the fake it checks signatures, signed headers, expiry and
+  part sizes. Three cases run there alone: an upload URL is refused without
+  its create-only condition, and after its deadline; the hand-signed
+  completion URL completes its own upload and no other. They need Docker
+  and are skipped without it and in short mode.
 
 ## 12. Out of scope
 
@@ -602,8 +608,8 @@ one server on a bucket; more than one level of parents.
 
 - Access is open, so anyone who learns the endpoint ID can fill the bucket.
 - The service behind the bucket has to honor `If-None-Match: *` on PUT (AWS
-  S3 does). On one that ignores it, a client could replace an object after
-  the server verified it.
+  S3 does; RustFS 1.0.1 and MinIO do in the tests). On one that ignores
+  it, a client could replace an object after the server verified it.
 - A reference whose pack would be larger than `--max-pack-size`
   uncompressed cannot be pushed.
 - Every base pack costs a links object in the bucket, about 8 bytes per

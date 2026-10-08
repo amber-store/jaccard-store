@@ -291,3 +291,32 @@ func TestExpandPassesOnWriteErrors(t *testing.T) {
 		t.Errorf("Expand: %v, want the writer's error", err)
 	}
 }
+
+// A pack without bytes may come as no data at all or as a zstd stream of
+// nothing: writers have produced both, and a reader takes both.
+func TestAPackWithoutBytesReadsFromNothingAndFromAnEmptyFrame(t *testing.T) {
+	var frame bytes.Buffer
+	enc, err := zstd.NewWriter(&frame, zstd.WithZeroFrames(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if frame.Len() == 0 {
+		t.Fatal("the test has no empty frame to read")
+	}
+	empty, err := NewIndex(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{"no data": nil, "an empty frame": frame.Bytes()} {
+		for o, err := range Objects(empty, bytes.NewReader(data)) {
+			t.Fatalf("%s: Objects yielded %v, %v", name, o.Key, err)
+		}
+		var out bytes.Buffer
+		if err := Expand(empty, bytes.NewReader(data), &out); err != nil || out.Len() != 0 {
+			t.Fatalf("%s: Expand wrote %d bytes, %v", name, out.Len(), err)
+		}
+	}
+}
