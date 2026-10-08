@@ -368,15 +368,25 @@ does. The endpoint ID is logged at start. Clients need nothing else.
 
 ### 7.5 Command
 
-```
-jaccard-stored --data DIR --s3-bucket NAME
-               [--s3-prefix P] [--s3-endpoint URL] [--s3-region R] [--s3-path-style]
-               [--admin-addr 127.0.0.1:8080]
-               [--upload-timeout 1h] [--url-ttl 1h] [--part-size 64MiB]
-               [--verify-jobs 2]
-```
+Every option can be given as a flag or as an environment variable. The flag
+wins when both are set.
 
-Credentials come from the SDK's default chain.
+| flag | environment | default |
+| --- | --- | --- |
+| `--data DIR` | `JACCARD_DATA` | required |
+| `--s3-bucket NAME` | `JACCARD_S3_BUCKET` | required |
+| `--s3-prefix P` | `JACCARD_S3_PREFIX` | none |
+| `--s3-endpoint URL` | `JACCARD_S3_ENDPOINT` | AWS |
+| `--s3-region R` | `JACCARD_S3_REGION` | the SDK's |
+| `--s3-path-style` | `JACCARD_S3_PATH_STYLE` | off |
+| `--admin-addr ADDR` | `JACCARD_ADMIN_ADDR` | `127.0.0.1:8080` |
+| `--upload-timeout D` | `JACCARD_UPLOAD_TIMEOUT` | `1h` |
+| `--url-ttl D` | `JACCARD_URL_TTL` | `1h` |
+| `--part-size N` | `JACCARD_PART_SIZE` | `64MiB` |
+| `--verify-jobs N` | `JACCARD_VERIFY_JOBS` | `2` |
+
+Credentials come from the SDK's default chain, which reads the usual
+`AWS_*` variables.
 
 ## 8. Statistics and the admin page
 
@@ -462,9 +472,21 @@ jaccard-store --store DIR --server ENDPOINT_ID [--key FILE] COMMAND
   rm NAME
 ```
 
-`--store` defaults to `$AMBER_STORE`, `--server` to `$JACCARD_SERVER`,
-`--key` to `jaccard-store/client.key` in the user's configuration directory,
-created on first use. The client resolves the server by ID through pkarr/DNS
+Every option can be given as a flag or as an environment variable. The flag
+wins when both are set.
+
+| flag | environment | default |
+| --- | --- | --- |
+| `--store DIR` | `JACCARD_STORE`, then `AMBER_STORE` | required |
+| `--server ENDPOINT_ID` | `JACCARD_SERVER` | required |
+| `--key FILE` | `JACCARD_KEY` | `jaccard-store/client.key` in the user's configuration directory, created on first use |
+| `push --min-dedup F` | `JACCARD_MIN_DEDUP` | `0.5` |
+
+`--as` has no variable: it names the one ref of one invocation. `AMBER_STORE`
+is read as well because it is what core's own CLI uses for the same
+directory.
+
+The client resolves the server by ID through pkarr/DNS
 and mDNS and uses the relay as fallback path.
 
 ## 10. Layout
