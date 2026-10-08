@@ -141,22 +141,31 @@ export JACCARD_STORE=./st JACCARD_SERVER=<endpoint id>
 
 amber-store --store ./st ingest --ref snap ./some/dir
 jaccard-store push snap                  # or: push --as releases/1.0 snap
-jaccard-store ls
+jaccard-store ls                          # or: ls releases/ 'nightly/*'
 jaccard-store pull --as copy releases/1.0
 jaccard-store rm releases/1.0
 jaccard-store rm 'nightly/*' 'v0.[1-3].?'  # patterns, quoted from the shell
 ```
 
-`rm` takes one or more patterns and removes every reference one of them
-matches, printing each as `ls` would. A pattern is a name, or one with `*`
+`ls` and `rm` take any number of patterns; a reference that several of
+them match is listed or removed once. A pattern is a name, or one with `*`
 (any run of characters), `?` (any one), `[a-c]` or `[^a-c]` (one of these,
 or one but these) and `\` before a character that is meant as itself. A
-slash is a character like any other, as it is to the prefix of `ls`:
-`nightly/*` is everything under `nightly/`, however deep.
+slash is a character like any other: `nightly/*` is everything under
+`nightly/`, however deep.
 
-Everything is looked up before anything is removed. An argument that
-matches nothing, or is no pattern, ends the command with nothing removed:
-a mistyped argument does not take the half that was spelled right.
+- `ls` lists what the patterns match, by name, and everything when it has
+  no argument. An argument without one of the special characters is what a
+  name begins with: `ls releases/` lists what `ls 'releases/*'` does.
+  Nothing of the kind is no error; nothing is listed.
+- `rm` removes what the patterns match and prints each as `ls` would. An
+  argument without a special character is a name, and that reference alone
+  is removed. Everything is looked up before anything is removed: an
+  argument that matches nothing, or is no pattern, ends the command with
+  nothing removed, so a mistyped argument does not take the half that was
+  spelled right.
+
+With a pattern, `ls` shows exactly what `rm` would remove.
 
 A directory goes to the server and comes back without a store of your own:
 

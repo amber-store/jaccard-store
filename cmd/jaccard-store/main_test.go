@@ -335,6 +335,97 @@ func TestRmTakesPatterns(t *testing.T) {
 	}
 }
 
+func TestLsTakesPatterns(t *testing.T) {
+	all := []string{"a/one", "a/two", "a/deep/three", "b/one", "c", "star*name", "v1.0", "v1.1", "v2.0"}
+	everything := "a/deep/three a/one a/two b/one c star*name v1.0 v1.1 v2.0"
+	for _, tc := range []struct {
+		args []string
+		want string // what is listed, in the order it comes
+	}{
+		{nil, everything},
+		{[]string{"*"}, everything},
+		// Without a special character, what a name begins with: as ls
+		// was before it took patterns.
+		{[]string{"a/"}, "a/deep/three a/one a/two"},
+		{[]string{"a/o"}, "a/one"},
+		{[]string{"v1"}, "v1.0 v1.1"},
+		{[]string{"c"}, "c"},
+		{[]string{""}, everything},
+		// With one, a pattern, and the whole name has to match it: as
+		// rm reads it.
+		{[]string{"a/*"}, "a/deep/three a/one a/two"},
+		{[]string{"a/o*"}, "a/one"},
+		{[]string{"a/o?"}, ""},
+		{[]string{"*/one"}, "a/one b/one"},
+		{[]string{"v1.?"}, "v1.0 v1.1"},
+		{[]string{"v?.0"}, "v1.0 v2.0"},
+		{[]string{"[ab]/one"}, "a/one b/one"},
+		{[]string{`star\*name`}, "star*name"},
+		// Several arguments: all they match, each once, by name.
+		{[]string{"v2.0", "a/", "c"}, "a/deep/three a/one a/two c v2.0"},
+		{[]string{"a/*", "*/one", "a/one", "a/"}, "a/deep/three a/one a/two b/one"},
+		// Nothing of the kind is an answer, not a failure, and does not
+		// stand in the way of what the other arguments match.
+		{[]string{"x/*"}, ""},
+		{[]string{"zzz"}, ""},
+		{[]string{"zzz", "c", "x/*"}, "c"},
+	} {
+		f := served(all...)
+		out, err := run(t, f, nil, append([]string{"ls"}, tc.args...)...)
+		if err != nil {
+			t.Errorf("ls %q: %v", tc.args, err)
+			continue
+		}
+		var listed []string
+		for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+			if line == "" {
+				continue
+			}
+			name, root, _ := strings.Cut(line, " ")
+			if len(root) != 64 {
+				t.Errorf("ls %q printed %q", tc.args, line)
+			}
+			listed = append(listed, name)
+		}
+		if got := strings.Join(listed, " "); got != tc.want {
+			t.Errorf("ls %q listed %q, want %q", tc.args, got, tc.want)
+		}
+		if len(f.deleted) != 0 {
+			t.Errorf("ls %q removed %v", tc.args, f.deleted)
+		}
+	}
+}
+
+func TestLsRefusesWhatIsNoPatternBeforeItDials(t *testing.T) {
+	f := served("a/one")
+	if _, err := run(t, f, nil, "ls", "a/one", "a/[one"); err == nil || !strings.Contains(err.Error(), "is not a pattern") {
+		t.Fatalf("ls: %v", err)
+	}
+	if f.settings != (settings{}) || len(f.listed) != 0 {
+		t.Error("ls got as far as the server")
+	}
+}
+
+// What ls shows for a pattern is what rm removes for it: the one is how to
+// look before the other.
+func TestLsOfAPatternListsWhatRmOfItRemoves(t *testing.T) {
+	all := []string{"a/one", "a/two", "a/deep/three", "b/one", "c", "v1.0", "v1.1", "v2.0"}
+	for _, pattern := range []string{"*", "a/*", "*/one", "v?.0", "[bc]*", "*e", "a/t*", "v1.[0-9]"} {
+		f := served(all...)
+		listed, err := run(t, f, nil, "ls", pattern)
+		if err != nil {
+			t.Fatal(err)
+		}
+		removed, err := run(t, f, nil, "rm", pattern)
+		if err != nil {
+			t.Fatalf("rm %q: %v", pattern, err)
+		}
+		if listed != removed || listed == "" {
+			t.Errorf("%q: ls listed\n%s\nrm removed\n%s", pattern, listed, removed)
+		}
+	}
+}
+
 // The server is asked for the names that begin as the pattern does, and no
 // more than that.
 func TestRmListsByWhatAPatternBeginsWith(t *testing.T) {
@@ -344,6 +435,13 @@ func TestRmListsByWhatAPatternBeginsWith(t *testing.T) {
 	}
 	if got := strings.Join(f.listed, " "); got != "a/t b/one a/o" {
 		t.Fatalf("listed the prefixes %q", got)
+	}
+	f = served("a/one", "a/two", "b/one")
+	if _, err := run(t, f, nil, "ls", "a/t*", "b/", "*/one"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.listed, "|"); got != "a/t|b/|" {
+		t.Fatalf("ls listed the prefixes %q", got)
 	}
 }
 
@@ -458,7 +556,7 @@ func TestLiteralPrefix(t *testing.T) {
 func TestArgumentCounts(t *testing.T) {
 	f := &fakeRemote{}
 	for _, args := range [][]string{
-		{"push"}, {"push", "a", "b"}, {"pull"}, {"pull", "a", "b"}, {"rm"}, {"ls", "a", "b"},
+		{"push"}, {"push", "a", "b"}, {"pull"}, {"pull", "a", "b"}, {"rm"},
 	} {
 		if _, err := run(t, f, nil, append([]string{"--store", t.TempDir()}, args...)...); err == nil {
 			t.Errorf("%v: accepted", args)
