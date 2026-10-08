@@ -220,7 +220,7 @@ func (p *peer) push(name string, root key.Key) client.PushResult {
 
 func (p *peer) pull(name string) client.PullResult {
 	p.t.Helper()
-	res, err := p.client.Pull(p.w.ctx, p.objects, name)
+	res, err := p.client.Pull(p.w.ctx, p.objects, name, client.PullOptions{})
 	if err != nil {
 		p.t.Fatalf("pull %s: %v", name, err)
 	}
@@ -521,7 +521,7 @@ func aMovedRefLeavesItsOldPackToBeCollected(t *testing.T, s3 backend) {
 	if err := alice.client.Delete(w.ctx, "moving"); !errors.Is(err, client.ErrNotFound) {
 		t.Fatalf("deleting a ref that is gone: %v, want ErrNotFound", err)
 	}
-	if _, err := bob.client.Pull(w.ctx, bob.objects, "moving"); !errors.Is(err, client.ErrNotFound) {
+	if _, err := bob.client.Pull(w.ctx, bob.objects, "moving", client.PullOptions{}); !errors.Is(err, client.ErrNotFound) {
 		t.Fatalf("pulling a ref that is gone: %v, want ErrNotFound", err)
 	}
 	if st := w.stats(); st.Refs != 0 || st.BasePacks != 0 {
@@ -707,7 +707,7 @@ func aMalformedUploadIsRefusedAndRemoved(t *testing.T, s3 backend) {
 	if resp.Error == nil || resp.Error.Code != wire.CodeMalformedPack {
 		t.Fatalf("commit answered %+v, want malformed_pack", resp)
 	}
-	if _, err := mallory.client.Pull(w.ctx, mallory.objects, "bad"); !errors.Is(err, client.ErrNotFound) {
+	if _, err := mallory.client.Pull(w.ctx, mallory.objects, "bad", client.PullOptions{}); !errors.Is(err, client.ErrNotFound) {
 		t.Fatalf("the ref of a refused pack: %v, want ErrNotFound", err)
 	}
 	w.sweep()

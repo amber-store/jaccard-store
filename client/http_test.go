@@ -37,7 +37,7 @@ func TestPutSendsLengthAndBodyAndReturnsETag(t *testing.T) {
 	defer srv.Close()
 
 	body := []byte("pack bytes")
-	etag, err := newTestClient().putPart(context.Background(), "data", srv.URL+"/k?sig=s3cret", bytes.NewReader(body), int64(len(body)))
+	etag, err := newTestClient().putPart(context.Background(), "data", srv.URL+"/k?sig=s3cret", bytes.NewReader(body), 0, int64(len(body)), silent{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,10 +54,10 @@ func TestCreateCarriesTheConditionAndAPartDoesNot(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newTestClient()
-	if err := c.create(context.Background(), "index", srv.URL, strings.NewReader("x"), 1); err != nil {
+	if err := c.create(context.Background(), "index", srv.URL, strings.NewReader("x"), 1, silent{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.putPart(context.Background(), "part", srv.URL, strings.NewReader("x"), 1); err != nil {
+	if _, err := c.putPart(context.Background(), "part", srv.URL, strings.NewReader("x"), 0, 1, silent{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(conditions) != 2 || conditions[0] != "*" || conditions[1] != "" {
@@ -71,7 +71,7 @@ func TestCreateOfAnObjectThatExistsFails(t *testing.T) {
 		io.WriteString(w, `<Error><Code>PreconditionFailed</Code><Message>At least one of the pre-conditions you specified did not hold</Message></Error>`)
 	}))
 	defer srv.Close()
-	err := newTestClient().create(context.Background(), "data", srv.URL, strings.NewReader("x"), 1)
+	err := newTestClient().create(context.Background(), "data", srv.URL, strings.NewReader("x"), 1, silent{})
 	if err == nil || !strings.Contains(err.Error(), "PreconditionFailed") {
 		t.Fatalf("create = %v, want the bucket's refusal", err)
 	}
@@ -84,7 +84,7 @@ func TestPutOfNothingSendsALengthOfZero(t *testing.T) {
 		length, encoding = r.ContentLength, r.TransferEncoding
 	}))
 	defer srv.Close()
-	if err := newTestClient().create(context.Background(), "data", srv.URL, strings.NewReader(""), 0); err != nil {
+	if err := newTestClient().create(context.Background(), "data", srv.URL, strings.NewReader(""), 0, silent{}); err != nil {
 		t.Fatal(err)
 	}
 	if length != 0 || len(encoding) != 0 {
@@ -105,7 +105,7 @@ func TestRefusalIsReportedWithoutTheURL(t *testing.T) {
 	c := newTestClient()
 	url := srv.URL + "/k?X-Amz-Signature=s3cret"
 
-	err := c.create(context.Background(), "index", url, strings.NewReader("x"), 1)
+	err := c.create(context.Background(), "index", url, strings.NewReader("x"), 1, silent{})
 	if err == nil || !strings.Contains(err.Error(), "403") || !strings.Contains(err.Error(), "SignatureDoesNotMatch") ||
 		!strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("create: %v, want the status, the code and the message", err)
@@ -134,12 +134,12 @@ func TestGetAllHoldsTheObjectToItsSize(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := newTestClient()
-	b, err := c.getAll(context.Background(), "index", srv.URL, 10)
+	b, err := c.getAll(context.Background(), "index", srv.URL, 10, silent{})
 	if err != nil || string(b) != "0123456789" {
 		t.Fatalf("getAll = %q, %v", b, err)
 	}
 	for _, size := range []uint64{9, 11, 0} {
-		if _, err := c.getAll(context.Background(), "index", srv.URL, size); err == nil {
+		if _, err := c.getAll(context.Background(), "index", srv.URL, size, silent{}); err == nil {
 			t.Errorf("getAll accepted 10 bytes as an object of %d", size)
 		}
 	}
@@ -201,7 +201,7 @@ func TestPutPartsUploadsEveryPartAndCompletes(t *testing.T) {
 	defer srv.Close()
 
 	data := bytes.Repeat([]byte("abcdefghij"), 25) // 250 bytes: parts of 100, 100, 50
-	err := newTestClient().putParts(context.Background(), bytes.NewReader(data), int64(len(data)), partsFor(srv.URL, 3, 100), 2)
+	err := newTestClient().putParts(context.Background(), bytes.NewReader(data), int64(len(data)), partsFor(srv.URL, 3, 100), 2, silent{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestPutPartsTakesAnErrorBodyForAFailure(t *testing.T) {
 	f := &fakeMultipart{parts: map[string][]byte{}, answer: `<Error><Code>InternalError</Code><Message>try again</Message></Error>`}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	err := newTestClient().putParts(context.Background(), strings.NewReader("0123456789"), 10, partsFor(srv.URL, 1, 100), 1)
+	err := newTestClient().putParts(context.Background(), strings.NewReader("0123456789"), 10, partsFor(srv.URL, 1, 100), 1, silent{})
 	if err == nil || !strings.Contains(err.Error(), "InternalError") {
 		t.Fatalf("putParts = %v, want the failure the body reports", err)
 	}
@@ -239,7 +239,7 @@ func TestPutPartsNeedsAnETagOfEveryPart(t *testing.T) {
 	f := &fakeMultipart{parts: map[string][]byte{}, answer: completed, noETag: true}
 	srv := httptest.NewServer(f)
 	defer srv.Close()
-	err := newTestClient().putParts(context.Background(), strings.NewReader("0123456789"), 10, partsFor(srv.URL, 1, 100), 1)
+	err := newTestClient().putParts(context.Background(), strings.NewReader("0123456789"), 10, partsFor(srv.URL, 1, 100), 1, silent{})
 	if err == nil || !strings.Contains(err.Error(), "ETag") {
 		t.Fatalf("putParts = %v, want a complaint about the missing ETag", err)
 	}
@@ -248,10 +248,10 @@ func TestPutPartsNeedsAnETagOfEveryPart(t *testing.T) {
 func TestPutPartsRefusesALayoutThatDoesNotFitTheData(t *testing.T) {
 	c := newTestClient()
 	data := strings.NewReader("0123456789")
-	if err := c.putParts(context.Background(), data, 10, partsFor("http://unused.invalid", 3, 100), 1); err == nil {
+	if err := c.putParts(context.Background(), data, 10, partsFor("http://unused.invalid", 3, 100), 1, silent{}); err == nil {
 		t.Error("putParts accepted three URLs for one part")
 	}
-	if err := c.putParts(context.Background(), data, 10, partsFor("http://unused.invalid", 1, 0), 1); err == nil {
+	if err := c.putParts(context.Background(), data, 10, partsFor("http://unused.invalid", 1, 0), 1, silent{}); err == nil {
 		t.Error("putParts accepted a part size of zero")
 	}
 }
@@ -297,7 +297,7 @@ func TestAPartIsSentAgainWhenTheBucketIsBusy(t *testing.T) {
 	srv := httptest.NewServer(b)
 	defer srv.Close()
 	data := bytes.Repeat([]byte("abcdefghij"), 25)
-	if err := newTestClient().putParts(context.Background(), bytes.NewReader(data), int64(len(data)), partsFor(srv.URL, 3, 100), 2); err != nil {
+	if err := newTestClient().putParts(context.Background(), bytes.NewReader(data), int64(len(data)), partsFor(srv.URL, 3, 100), 2, silent{}); err != nil {
 		t.Fatal(err)
 	}
 	var joined []byte
@@ -313,7 +313,7 @@ func TestAPartIsGivenUpAfterItsAttemptsAndAtOnceWhenRefused(t *testing.T) {
 	b := &busy{fakeMultipart: fakeMultipart{parts: map[string][]byte{}, answer: completed}, failures: map[string]int{}, n: 1000, status: http.StatusServiceUnavailable}
 	srv := httptest.NewServer(b)
 	defer srv.Close()
-	err := newTestClient().putParts(context.Background(), strings.NewReader("0123456789"), 10, partsFor(srv.URL, 1, 100), 1)
+	err := newTestClient().putParts(context.Background(), strings.NewReader("0123456789"), 10, partsFor(srv.URL, 1, 100), 1, silent{})
 	if err == nil || b.failures["1"] != partAttempts {
 		t.Fatalf("putParts = %v after %d attempts, want a failure after %d", err, b.failures["1"], partAttempts)
 	}
@@ -322,7 +322,7 @@ func TestAPartIsGivenUpAfterItsAttemptsAndAtOnceWhenRefused(t *testing.T) {
 	b = &busy{fakeMultipart: fakeMultipart{parts: map[string][]byte{}, answer: completed}, failures: map[string]int{}, n: 1000, status: http.StatusForbidden}
 	srv2 := httptest.NewServer(b)
 	defer srv2.Close()
-	err = newTestClient().putParts(context.Background(), strings.NewReader("0123456789"), 10, partsFor(srv2.URL, 1, 100), 1)
+	err = newTestClient().putParts(context.Background(), strings.NewReader("0123456789"), 10, partsFor(srv2.URL, 1, 100), 1, silent{})
 	if err == nil || b.failures["1"] != 1 {
 		t.Fatalf("putParts = %v after %d attempts, want a failure after 1", err, b.failures["1"])
 	}

@@ -1,8 +1,8 @@
 // Command jaccard-store pushes references from a local Amber-Store Core
 // store to a jaccard-store server and pulls them back.
 //
-//	jaccard-store --store DIR --server ENDPOINT_ID push [--as NAME] [--min-dedup F] REF
-//	jaccard-store --store DIR --server ENDPOINT_ID pull [--as REF] NAME
+//	jaccard-store --store DIR --server ENDPOINT_ID push [--as NAME] [--min-dedup F] [--no-progress] REF
+//	jaccard-store --store DIR --server ENDPOINT_ID pull [--as REF] [--no-progress] NAME
 //	jaccard-store --server ENDPOINT_ID ls [PREFIX]
 //	jaccard-store --server ENDPOINT_ID rm NAME
 //
@@ -10,6 +10,10 @@
 // refstore); ingesting into it and restoring from it are that CLI's job.
 // The server is named by its endpoint ID alone. Every option is a flag and
 // an environment variable; the flag wins.
+//
+// A push and a pull show on standard error what they are doing: a line for
+// every step with the time it took, and for the step that is running a bar,
+// the rate and the time left (progress.go).
 package main
 
 import (
@@ -25,6 +29,7 @@ import (
 	"github.com/amber-store/core/key"
 	"github.com/amber-store/core/reference"
 	"github.com/amber-store/jaccard-store/client"
+	"github.com/amber-store/jaccard-store/human"
 	"github.com/amber-store/jaccard-store/node"
 	"github.com/amber-store/jaccard-store/wire"
 	irohkey "github.com/tmc/go-iroh/key"
@@ -54,7 +59,7 @@ func main() {
 // remote is the server as the commands use it.
 type remote interface {
 	Push(ctx context.Context, store *localStore, name string, root key.Key, opts client.PushOptions) (client.PushResult, error)
-	Pull(ctx context.Context, store *localStore, name string) (client.PullResult, error)
+	Pull(ctx context.Context, store *localStore, name string, opts client.PullOptions) (client.PullResult, error)
 	List(ctx context.Context, prefix string) ([]client.Ref, error)
 	Delete(ctx context.Context, name string) error
 	Close() error
@@ -86,6 +91,11 @@ func defaultKeyFile() string {
 // newApp returns the command. connect is how it reaches a server, which
 // lets a test put something else in the server's place.
 func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
+	// A flag of push and of pull alike; each command gets its own.
+	noProgress := func() cli.Flag {
+		return &cli.BoolFlag{Name: "no-progress", EnvVars: []string{"JACCARD_NO_PROGRESS"},
+			Usage: "do not show on standard error what is being done"}
+	}
 	return &cli.App{
 		Name:            "jaccard-store",
 		Version:         version,
@@ -112,6 +122,7 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 					&cli.StringFlag{Name: "as", Usage: "`NAME` of the reference on the server (default: REF)"},
 					&cli.Float64Flag{Name: "min-dedup", EnvVars: []string{"JACCARD_MIN_DEDUP"}, Value: 0.5,
 						Usage: "upload a patch pack when the nearest base pack holds at least this `FRACTION` of the bytes"},
+					noProgress(),
 				},
 				Action: func(c *cli.Context) error { return runPush(c, connect) },
 			},
@@ -121,6 +132,7 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 				ArgsUsage: "NAME",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "as", Usage: "`REF`, the name of the local reference (default: NAME)"},
+					noProgress(),
 				},
 				Action: func(c *cli.Context) error { return runPull(c, connect) },
 			},
@@ -138,6 +150,19 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 			},
 		},
 	}
+}
+
+// reach connects to the server, as the first step of what show shows. When
+// that fails the show is over.
+func reach(ctx context.Context, connect dialer, s settings, show *progress) (remote, error) {
+	show.Begin("connecting to the server", 0, client.NoUnit)
+	server, err := connect(ctx, s)
+	if err != nil {
+		show.Close(err)
+		return nil, err
+	}
+	show.End("")
+	return server, nil
 }
 
 // one returns the single argument a command takes.
@@ -171,12 +196,14 @@ func runPush(c *cli.Context, connect dialer) error {
 	if err != nil {
 		return err
 	}
-	server, err := connect(c.Context, s)
+	show := newProgress(c.App.ErrWriter, c.Bool("no-progress"))
+	server, err := reach(c.Context, connect, s, show)
 	if err != nil {
 		return err
 	}
 	defer server.Close()
-	res, err := server.Push(c.Context, store, name, root, client.PushOptions{MinDedup: minDedup})
+	res, err := server.Push(c.Context, store, name, root, client.PushOptions{MinDedup: minDedup, Progress: show})
+	show.Close(err)
 	if err != nil {
 		return err
 	}
@@ -185,10 +212,10 @@ func runPush(c *cli.Context, connect dialer) error {
 		fmt.Fprintf(c.App.Writer, "%s %s: the server has the pack already\n", name, root)
 	case res.Parent != nil:
 		fmt.Fprintf(c.App.Writer, "%s %s: patch pack of %s, %d objects, %s uploaded\n",
-			name, root, res.Parent, res.Objects, human(res.DataSize))
+			name, root, res.Parent, res.Objects, human.Bytes(res.DataSize))
 	default:
 		fmt.Fprintf(c.App.Writer, "%s %s: base pack, %d objects, %s uploaded\n",
-			name, root, res.Objects, human(res.DataSize))
+			name, root, res.Objects, human.Bytes(res.DataSize))
 	}
 	return nil
 }
@@ -213,7 +240,8 @@ func runPull(c *cli.Context, connect dialer) error {
 		return err
 	}
 	defer store.Close()
-	server, err := connect(c.Context, s)
+	show := newProgress(c.App.ErrWriter, c.Bool("no-progress"))
+	server, err := reach(c.Context, connect, s, show)
 	if err != nil {
 		return err
 	}
@@ -223,17 +251,20 @@ func runPull(c *cli.Context, connect dialer) error {
 	// in one span, so a collection running beside this cannot fall between.
 	span, err := store.Begin()
 	if err != nil {
+		show.Close(err)
 		return err
 	}
-	res, err := server.Pull(c.Context, store, name)
+	res, err := server.Pull(c.Context, store, name, client.PullOptions{Progress: show})
 	if err == nil {
 		err = span.SetRef(ref, res.Root)
 	}
-	if err = errors.Join(err, span.End()); err != nil {
+	err = errors.Join(err, span.End())
+	show.Close(err)
+	if err != nil {
 		return err
 	}
 	fmt.Fprintf(c.App.Writer, "%s %s: %d packs fetched, %d objects written (%s)\n",
-		ref, res.Root, res.Packs, res.Objects, human(res.Bytes))
+		ref, res.Root, res.Packs, res.Objects, human.Bytes(res.Bytes))
 	return nil
 }
 
@@ -271,20 +302,6 @@ func runRemove(c *cli.Context, connect dialer) error {
 	return server.Delete(c.Context, name)
 }
 
-// human formats a byte count with a binary unit.
-func human(n uint64) string {
-	units := []string{"B", "KiB", "MiB", "GiB", "TiB"}
-	f, u := float64(n), 0
-	for f >= 1024 && u < len(units)-1 {
-		f /= 1024
-		u++
-	}
-	if u == 0 {
-		return fmt.Sprintf("%d B", n)
-	}
-	return fmt.Sprintf("%.2f %s", f, units[u])
-}
-
 // connection is a server reached over iroh.
 type connection struct {
 	conn   *node.Conn
@@ -318,8 +335,8 @@ func (c *connection) Push(ctx context.Context, store *localStore, name string, r
 	return c.client.Push(ctx, store.objects, name, root, opts)
 }
 
-func (c *connection) Pull(ctx context.Context, store *localStore, name string) (client.PullResult, error) {
-	return c.client.Pull(ctx, store.objects, name)
+func (c *connection) Pull(ctx context.Context, store *localStore, name string, opts client.PullOptions) (client.PullResult, error) {
+	return c.client.Pull(ctx, store.objects, name, opts)
 }
 
 func (c *connection) List(ctx context.Context, prefix string) ([]client.Ref, error) {
