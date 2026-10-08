@@ -28,6 +28,8 @@ type fakeRemote struct {
 	listed   []string
 	deleted  []string
 	pushErr  error
+	// deleteErr is what removing a name fails with, for the names in it.
+	deleteErr map[string]error
 }
 
 func (f *fakeRemote) Push(_ context.Context, _ *localStore, name string, root key.Key, opts client.PushOptions) (client.PushResult, error) {
@@ -54,10 +56,19 @@ func (f *fakeRemote) Pull(_ context.Context, _ *localStore, name string, opts cl
 
 func (f *fakeRemote) List(_ context.Context, prefix string) ([]client.Ref, error) {
 	f.listed = append(f.listed, prefix)
-	return f.refs, nil
+	var refs []client.Ref
+	for _, r := range f.refs {
+		if strings.HasPrefix(r.Name, prefix) {
+			refs = append(refs, r)
+		}
+	}
+	return refs, nil
 }
 
 func (f *fakeRemote) Delete(_ context.Context, name string) error {
+	if err := f.deleteErr[name]; err != nil {
+		return err
+	}
 	f.deleted = append(f.deleted, name)
 	return nil
 }
@@ -256,15 +267,198 @@ func TestListAndRemove(t *testing.T) {
 	if want := "a/one " + root.String() + "\na/two " + root.String() + "\n"; out != want || f.listed[0] != "a/" {
 		t.Fatalf("ls printed %q for prefix %q", out, f.listed)
 	}
-	if _, err := run(t, f, nil, "rm", "a/one"); err != nil || len(f.deleted) != 1 || f.deleted[0] != "a/one" {
+	out, err = run(t, f, nil, "rm", "a/one")
+	if err != nil || len(f.deleted) != 1 || f.deleted[0] != "a/one" {
 		t.Fatalf("rm: %v, deleted %v", err, f.deleted)
+	}
+	// What is gone is printed as ls printed it.
+	if want := "a/one " + root.String() + "\n"; out != want {
+		t.Fatalf("rm printed %q, want %q", out, want)
+	}
+}
+
+// served is a server with references of these names.
+func served(names ...string) *fakeRemote {
+	f := &fakeRemote{}
+	for i, name := range names {
+		f.refs = append(f.refs, client.Ref{Name: name, Root: key.Key{byte(i + 1)}})
+	}
+	return f
+}
+
+func TestRmTakesPatterns(t *testing.T) {
+	all := []string{"a/one", "a/two", "a/deep/three", "b/one", "c", "star*name", "v1.0", "v1.1", "v2.0"}
+	for _, tc := range []struct {
+		args []string
+		want string // what is removed, in the order it goes
+	}{
+		{[]string{"c"}, "c"},
+		// A star takes anything, slashes too: a name is a string to the
+		// server, and what is under a/ is all of it.
+		{[]string{"a/*"}, "a/deep/three a/one a/two"},
+		{[]string{"*/one"}, "a/one b/one"},
+		{[]string{"*three"}, "a/deep/three"},
+		{[]string{"v1.?"}, "v1.0 v1.1"},
+		{[]string{"v?.0"}, "v1.0 v2.0"},
+		{[]string{"[ab]/one"}, "a/one b/one"},
+		{[]string{"[^a]/one"}, "b/one"},
+		{[]string{"v[1-2].0"}, "v1.0 v2.0"},
+		// A name that holds a star is asked for with the star escaped;
+		// unescaped it is a pattern, which the name matches as well.
+		{[]string{`star\*name`}, "star*name"},
+		{[]string{"star*"}, "star*name"},
+		// Several arguments: all they match, each once, by name.
+		{[]string{"v2.0", "a/one", "c"}, "a/one c v2.0"},
+		{[]string{"a/*", "*/one", "a/one"}, "a/deep/three a/one a/two b/one"},
+		{[]string{"*"}, "a/deep/three a/one a/two b/one c star*name v1.0 v1.1 v2.0"},
+	} {
+		f := served(all...)
+		out, err := run(t, f, nil, append([]string{"rm"}, tc.args...)...)
+		if err != nil {
+			t.Errorf("rm %q: %v", tc.args, err)
+			continue
+		}
+		if got := strings.Join(f.deleted, " "); got != tc.want {
+			t.Errorf("rm %q removed %q, want %q", tc.args, got, tc.want)
+		}
+		var printed []string
+		for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+			name, root, _ := strings.Cut(line, " ")
+			if len(root) != 64 {
+				t.Errorf("rm %q printed %q", tc.args, line)
+			}
+			printed = append(printed, name)
+		}
+		if got := strings.Join(printed, " "); got != tc.want {
+			t.Errorf("rm %q printed %q, want %q", tc.args, got, tc.want)
+		}
+	}
+}
+
+// The server is asked for the names that begin as the pattern does, and no
+// more than that.
+func TestRmListsByWhatAPatternBeginsWith(t *testing.T) {
+	f := served("a/one", "a/two", "b/one")
+	if _, err := run(t, f, nil, "rm", "a/t*", "b/one", `a/o\ne`); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(f.listed, " "); got != "a/t b/one a/o" {
+		t.Fatalf("listed the prefixes %q", got)
+	}
+}
+
+func TestRmRemovesNothingWhenAnArgumentMatchesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		args     []string
+		notFound bool   // the error is that of a name that is not there
+		says     string // and names the argument
+	}{
+		{[]string{"a/*", "x/*"}, false, `no reference matches "x/*"`},
+		{[]string{"x/*", "a/*"}, false, `no reference matches "x/*"`},
+		{[]string{"a/one", "a/three"}, true, `"a/three"`},
+		{[]string{"a"}, true, `"a"`},         // what a name begins with is not the name
+		{[]string{"A/ONE"}, true, `"A/ONE"`}, // nor is another case of it
+		{[]string{"a/?"}, false, `"a/?"`},
+	} {
+		f := served("a/one", "a/two")
+		out, err := run(t, f, nil, append([]string{"rm"}, tc.args...)...)
+		if err == nil || errors.Is(err, client.ErrNotFound) != tc.notFound || !strings.Contains(err.Error(), tc.says) {
+			t.Errorf("rm %q: %v", tc.args, err)
+		}
+		if len(f.deleted) != 0 || out != "" {
+			t.Errorf("rm %q removed %v and printed %q", tc.args, f.deleted, out)
+		}
+	}
+}
+
+func TestRmRefusesWhatIsNoPatternBeforeItDials(t *testing.T) {
+	for _, args := range [][]string{{"a/[one"}, {"a/one", `b\`}, {"[]"}} {
+		f := served("a/one")
+		if _, err := run(t, f, nil, append([]string{"rm"}, args...)...); err == nil || !strings.Contains(err.Error(), "is not a pattern") {
+			t.Errorf("rm %q: %v", args, err)
+		}
+		if f.settings != (settings{}) || len(f.listed) != 0 || len(f.deleted) != 0 {
+			t.Errorf("rm %q got as far as the server", args)
+		}
+	}
+}
+
+func TestRmGoesOnPastAReferenceThatIsGoneAndStopsAtOneItCannotRemove(t *testing.T) {
+	// Removed by somebody else between the listing and the removal: that
+	// is no failure, and it is not printed as this command's doing.
+	f := served("a/one", "a/two", "a/three")
+	f.deleteErr = map[string]error{"a/three": client.ErrNotFound}
+	out, err := run(t, f, nil, "rm", "a/*")
+	if err != nil || strings.Join(f.deleted, " ") != "a/one a/two" || strings.Contains(out, "a/three") {
+		t.Fatalf("rm = %v, removed %v, printed %q", err, f.deleted, out)
+	}
+
+	// Anything else ends it there, with the reference named and what was
+	// removed before it printed.
+	f = served("a/one", "a/two", "a/zero")
+	broken := errors.New("the database is locked")
+	f.deleteErr = map[string]error{"a/two": broken}
+	out, err = run(t, f, nil, "rm", "a/*")
+	if !errors.Is(err, broken) || !strings.Contains(err.Error(), `"a/two"`) {
+		t.Fatalf("rm = %v", err)
+	}
+	if strings.Join(f.deleted, " ") != "a/one" || !strings.HasPrefix(out, "a/one ") || strings.Count(out, "\n") != 1 {
+		t.Fatalf("removed %v, printed %q", f.deleted, out)
+	}
+}
+
+func TestMatches(t *testing.T) {
+	for _, tc := range []struct {
+		pattern, name string
+		want          bool
+	}{
+		{"a", "a", true},
+		{"a", "ab", false},
+		{"", "", true},
+		{"*", "", true},
+		{"*", "a/b/c", true},
+		{"a/*", "a/", true},
+		{"a/*", "a", false},
+		{"a*", "a/b", true},
+		{"*/*", "ab", false},
+		{"?", "/", true},
+		{"a?b", "a/b", true},
+		{"a?b", "ab", false},
+		{"[a/]", "/", true},
+		{"a/b", "a/b", true},
+		{`a\/b`, "a/b", true},
+		{`\*`, "*", true},
+		{`\*`, "a", false},
+		{"é*", "éa", true},
+		{"?", "é", true},
+		{"a/[", "a/[", false}, // no pattern: it matches nothing
+	} {
+		if got := matches(tc.pattern, tc.name); got != tc.want {
+			t.Errorf("matches(%q, %q) = %v, want %v", tc.pattern, tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestLiteralPrefix(t *testing.T) {
+	for pattern, want := range map[string]string{
+		"":           "",
+		"a/one":      "a/one",
+		"a/*":        "a/",
+		"*":          "",
+		"a/o?e":      "a/o",
+		"rel[12]/x":  "rel",
+		`star\*name`: "star",
+	} {
+		if got := literalPrefix(pattern); got != want {
+			t.Errorf("literalPrefix(%q) = %q, want %q", pattern, got, want)
+		}
 	}
 }
 
 func TestArgumentCounts(t *testing.T) {
 	f := &fakeRemote{}
 	for _, args := range [][]string{
-		{"push"}, {"push", "a", "b"}, {"pull"}, {"pull", "a", "b"}, {"rm"}, {"rm", "a", "b"}, {"ls", "a", "b"},
+		{"push"}, {"push", "a", "b"}, {"pull"}, {"pull", "a", "b"}, {"rm"}, {"ls", "a", "b"},
 	} {
 		if _, err := run(t, f, nil, append([]string{"--store", t.TempDir()}, args...)...); err == nil {
 			t.Errorf("%v: accepted", args)

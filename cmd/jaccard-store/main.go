@@ -6,7 +6,7 @@
 //	jaccard-store --server ENDPOINT_ID push-dir [--min-dedup F] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR NAME
 //	jaccard-store --server ENDPOINT_ID pull-dir [--temp-dir DIR] [--no-progress] NAME DIR
 //	jaccard-store --server ENDPOINT_ID ls [PREFIX]
-//	jaccard-store --server ENDPOINT_ID rm NAME
+//	jaccard-store --server ENDPOINT_ID rm PATTERN...
 //
 // The store is the directory core's own CLI works on (a packstore and a
 // refstore); ingesting into it and restoring from it are that CLI's job.
@@ -180,9 +180,12 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 				Action:    func(c *cli.Context) error { return runList(c, connect) },
 			},
 			{
-				Name:      "rm",
-				Usage:     "remove the reference NAME from the server; packs nothing refers to any more are collected there",
-				ArgsUsage: "NAME",
+				Name: "rm",
+				Usage: "remove from the server the references that a PATTERN matches, and print them; " +
+					"packs nothing refers to any more are collected there. A PATTERN is a name, or one with " +
+					"* (any characters, slashes too), ? (any one), [a-c] (one of these) and \\ (the next character as it is); " +
+					"quote it, or the shell reads it first",
+				ArgsUsage: "PATTERN...",
 				Action:    func(c *cli.Context) error { return runRemove(c, connect) },
 			},
 		},
@@ -339,19 +342,6 @@ func runList(c *cli.Context, connect dialer) error {
 		}
 	}
 	return nil
-}
-
-func runRemove(c *cli.Context, connect dialer) error {
-	name, err := one(c, "NAME")
-	if err != nil {
-		return err
-	}
-	server, err := connect(c.Context, readSettings(c))
-	if err != nil {
-		return err
-	}
-	defer server.Close()
-	return server.Delete(c.Context, name)
 }
 
 // connection is a server reached over iroh.

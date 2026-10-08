@@ -560,7 +560,7 @@ jaccard-store --store DIR --server ENDPOINT_ID [--key FILE] COMMAND
   push-dir [--min-dedup 0.5] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR NAME
   pull-dir [--temp-dir DIR] [--no-progress] NAME DIR
   ls [PREFIX]
-  rm NAME
+  rm PATTERN...
 ```
 
 `--store` is for push and pull; the other commands do not read it.
@@ -586,6 +586,26 @@ directory.
 
 The client resolves the server by ID through pkarr/DNS
 and mDNS and uses the relay as fallback path.
+
+`rm` takes patterns. A pattern is a name, or one with `*` (any run of
+characters), `?` (any one character), `[a-c]` and `[^a-c]` (one of a set, or
+one outside it) and `\x` (the character x as it is): the syntax of Go's
+`path.Match`, with one difference. A slash is a character like any other
+and a star matches it, because a name is a string without structure to the
+server and to core, and the prefix of `ls` does not stop at a slash either.
+
+The patterns are the command's: the protocol has `list` and `delete` and
+nothing new. For each argument the server is asked for the names that begin
+with what the pattern begins with, up to its first special character, and
+the pattern is held against them. Every argument is resolved before
+anything is removed. One that is no pattern is refused before the server is
+dialed; one that matches nothing ends the command with nothing removed, as
+the error of a name that is not there when it has no special character.
+The references matched are then removed one by one, each once, in the
+order of their names, and printed as `ls` prints them. One that is gone by
+the time it is its turn, removed by somebody else, is passed over; any
+other failure ends the command there, with what was removed before it
+printed.
 
 ### 9.4 Progress
 
@@ -739,7 +759,10 @@ Tests are written before the code they cover.
   leans on the small pack instead.
 - `admin`: the API through `httptest`.
 - The command: its flags and variables against a server that records what
-  it is asked, and `push-dir` and `pull-dir` against one that keeps what is
+  it is asked, the patterns of `rm` among them (each kind of pattern, a
+  star across slashes, several arguments, one that matches nothing, one
+  that is no pattern, a reference gone meanwhile, a removal that fails),
+  and `push-dir` and `pull-dir` against one that keeps what is
   pushed in memory and gives it back. Covered there: a directory with files
   large and empty, an executable, nested and empty directories and a
   symbolic link comes back as it went; the temporary store is gone after a
