@@ -84,14 +84,15 @@ func (c *Client) get(ctx context.Context, what, url string) (io.ReadCloser, erro
 	return res.Body, nil
 }
 
-// getAll fetches an object that is known to be size bytes.
-func (c *Client) getAll(ctx context.Context, what, url string, size uint64) ([]byte, error) {
+// getAll fetches an object that is known to be size bytes and reports the
+// bytes to p as they arrive.
+func (c *Client) getAll(ctx context.Context, what, url string, size uint64, p Progress) ([]byte, error) {
 	body, err := c.get(ctx, what, url)
 	if err != nil {
 		return nil, err
 	}
 	defer body.Close()
-	b, err := io.ReadAll(io.LimitReader(body, int64(size)+1))
+	b, err := io.ReadAll(io.LimitReader(&meter{r: body, p: p}, int64(size)+1))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", what, err)
 	}
@@ -101,29 +102,42 @@ func (c *Client) getAll(ctx context.Context, what, url string, size uint64) ([]b
 	return b, nil
 }
 
-// create stores size bytes of body as a new object: the PUT of an index or
-// of data in one piece. The server signed the URL for a request that
-// carries the condition "If-None-Match: *", which lets the object be
+// create stores the first size bytes of data as a new object: the PUT of an
+// index or of data in one piece. The server signed the URL for a request
+// that carries the condition "If-None-Match: *", which lets the object be
 // written once and never replaced.
-func (c *Client) create(ctx context.Context, what, url string, body io.Reader, size int64) error {
-	_, err := c.send(ctx, what, url, body, size, true)
+func (c *Client) create(ctx context.Context, what, url string, data io.ReaderAt, size int64, p Progress) error {
+	_, err := c.send(ctx, what, url, data, 0, size, true, p)
 	return err
 }
 
-// putPart stores one part of a multipart upload and returns its ETag.
-func (c *Client) putPart(ctx context.Context, what, url string, body io.Reader, size int64) (string, error) {
-	return c.send(ctx, what, url, body, size, false)
+// putPart stores size bytes of data from off as one part of a multipart
+// upload and returns its ETag.
+func (c *Client) putPart(ctx context.Context, what, url string, data io.ReaderAt, off, size int64, p Progress) (string, error) {
+	return c.send(ctx, what, url, data, off, size, false, p)
 }
 
-// send PUTs size bytes of body to a pre-signed URL and returns the ETag of
-// the answer.
-func (c *Client) send(ctx context.Context, what, url string, body io.Reader, size int64, once bool) (string, error) {
-	if size == 0 {
-		body = http.NoBody
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, body)
+// send PUTs size bytes of data from off to a pre-signed URL and returns the
+// ETag of the answer. The bytes are reported to p as they leave; those of a
+// request that fails are taken back, so p counts what has arrived.
+func (c *Client) send(ctx context.Context, what, url string, data io.ReaderAt, off, size int64, once bool, p Progress) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("%s: malformed URL", what)
+	}
+	// The body is a section of something that can be read again, so the
+	// HTTP client is given the means to: it sends a request a second time
+	// when it is redirected, or when a connection it reused turns out to
+	// be closed.
+	var sent *meter
+	body := func() (io.ReadCloser, error) {
+		sent.undo()
+		sent = &meter{r: io.NewSectionReader(data, off, size), p: p}
+		return io.NopCloser(sent), nil
+	}
+	if size > 0 {
+		req.Body, _ = body()
+		req.GetBody = body
 	}
 	req.ContentLength = size
 	if once {
@@ -131,10 +145,12 @@ func (c *Client) send(ctx context.Context, what, url string, body io.Reader, siz
 	}
 	res, err := c.http.Do(req)
 	if err != nil {
+		sent.undo()
 		return "", transportError(what, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
+		sent.undo()
 		return "", httpError(what, res)
 	}
 	io.Copy(io.Discard, res.Body)
@@ -157,8 +173,8 @@ type completePart struct {
 const partAttempts = 4
 
 // putParts uploads size bytes of data in the parts the server laid out, a
-// few at a time, and completes the upload.
-func (c *Client) putParts(ctx context.Context, data io.ReaderAt, size int64, parts *wire.Parts, parallel int) error {
+// few at a time, and completes the upload. The bytes are reported to p.
+func (c *Client) putParts(ctx context.Context, data io.ReaderAt, size int64, parts *wire.Parts, parallel int, p Progress) error {
 	partSize := int64(parts.PartSize)
 	if partSize <= 0 {
 		return errors.New("data: the server named a part size of zero")
@@ -183,7 +199,7 @@ func (c *Client) putParts(ctx context.Context, data io.ReaderAt, size int64, par
 			var etag string
 			var err error
 			for attempt := 1; ; attempt++ {
-				etag, err = c.putPart(gctx, what, url, io.NewSectionReader(data, off, n), n)
+				etag, err = c.putPart(gctx, what, url, data, off, n, p)
 				if err == nil || attempt == partAttempts || !transient(err) || gctx.Err() != nil {
 					break
 				}

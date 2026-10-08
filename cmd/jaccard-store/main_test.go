@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,7 +15,7 @@ import (
 	"github.com/amber-store/jaccard-store/client"
 )
 
-var variables = []string{"JACCARD_STORE", "AMBER_STORE", "JACCARD_SERVER", "JACCARD_KEY", "JACCARD_MIN_DEDUP"}
+var variables = []string{"JACCARD_STORE", "AMBER_STORE", "JACCARD_SERVER", "JACCARD_KEY", "JACCARD_MIN_DEDUP", "JACCARD_NO_PROGRESS"}
 
 // fakeRemote stands where the server is and records what it was asked.
 type fakeRemote struct {
@@ -26,14 +27,28 @@ type fakeRemote struct {
 	refs     []client.Ref
 	listed   []string
 	deleted  []string
+	pushErr  error
 }
 
 func (f *fakeRemote) Push(_ context.Context, _ *localStore, name string, root key.Key, opts client.PushOptions) (client.PushResult, error) {
 	f.pushed, f.root, f.opts = append(f.pushed, name), root, opts
+	if opts.Progress != nil {
+		opts.Progress.Begin("uploading", 2048, client.Bytes)
+		opts.Progress.Advance(2048)
+		if f.pushErr != nil {
+			return client.PushResult{}, f.pushErr
+		}
+		opts.Progress.End("2.00 KiB")
+	}
 	return client.PushResult{Root: root, Objects: 3, DataSize: 2048}, nil
 }
 
-func (f *fakeRemote) Pull(_ context.Context, _ *localStore, name string) (client.PullResult, error) {
+func (f *fakeRemote) Pull(_ context.Context, _ *localStore, name string, opts client.PullOptions) (client.PullResult, error) {
+	if opts.Progress != nil {
+		opts.Progress.Begin("fetching the pack", 100, client.Bytes)
+		opts.Progress.Advance(100)
+		opts.Progress.End("3 of 3 objects were new, 100 B")
+	}
 	return client.PullResult{Root: f.pullRoot, Packs: 1, Objects: 3, Bytes: 100}, nil
 }
 
@@ -49,8 +64,16 @@ func (f *fakeRemote) Delete(_ context.Context, name string) error {
 
 func (f *fakeRemote) Close() error { return nil }
 
-// run runs the command with args under env alone, against f.
+// run runs the command with args under env alone, against f, and returns
+// what it wrote to standard output.
 func run(t *testing.T, f *fakeRemote, env map[string]string, args ...string) (string, error) {
+	t.Helper()
+	out, _, err := runBoth(t, f, env, args...)
+	return out, err
+}
+
+// runBoth is run that returns what went to standard error as well.
+func runBoth(t *testing.T, f *fakeRemote, env map[string]string, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	for _, name := range variables {
 		// Setenv registers the restore; a variable set to nothing would
@@ -61,13 +84,13 @@ func run(t *testing.T, f *fakeRemote, env map[string]string, args ...string) (st
 	for name, value := range env {
 		t.Setenv(name, value)
 	}
-	var out bytes.Buffer
-	app := newApp(&out, io.Discard, func(_ context.Context, s settings) (remote, error) {
+	var out, errOut bytes.Buffer
+	app := newApp(&out, &errOut, func(_ context.Context, s settings) (remote, error) {
 		f.settings = s
 		return f, nil
 	})
-	err := app.Run(append([]string{"jaccard-store"}, args...))
-	return out.String(), err
+	err = app.Run(append([]string{"jaccard-store"}, args...))
+	return out.String(), errOut.String(), err
 }
 
 // storeWithRef makes a store directory holding one small tree under the
@@ -292,5 +315,88 @@ func TestVersionIsPrinted(t *testing.T) {
 	}
 	if !strings.Contains(out, "jaccard-store") || !strings.Contains(out, version) {
 		t.Fatalf("--version printed %q, want the name and %q", out, version)
+	}
+}
+
+func TestPushShowsWhatItDoesOnStandardError(t *testing.T) {
+	dir, _ := storeWithRef(t, "local")
+	out, shown, err := runBoth(t, &fakeRemote{}, nil, "--store", dir, "push", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"connecting to the server (", "uploading: 2.00 KiB (", "done in "} {
+		if !strings.Contains(shown, want) {
+			t.Errorf("standard error lacks %q:\n%s", want, shown)
+		}
+	}
+	// The result is the command's output, and all of it.
+	if strings.Count(out, "\n") != 1 || !strings.Contains(out, "base pack, 3 objects") {
+		t.Errorf("standard output: %q", out)
+	}
+}
+
+func TestPullShowsWhatItDoesOnStandardError(t *testing.T) {
+	dir, root := storeWithRef(t, "local")
+	out, shown, err := runBoth(t, &fakeRemote{pullRoot: root}, nil, "--store", dir, "pull", "--as", "copy", "remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"connecting to the server (", "fetching the pack: 3 of 3 objects were new, 100 B (", "done in "} {
+		if !strings.Contains(shown, want) {
+			t.Errorf("standard error lacks %q:\n%s", want, shown)
+		}
+	}
+	if strings.Count(out, "\n") != 1 || !strings.Contains(out, "1 packs fetched") {
+		t.Errorf("standard output: %q", out)
+	}
+}
+
+func TestNoProgressShowsNothing(t *testing.T) {
+	dir, root := storeWithRef(t, "local")
+	for _, tc := range []struct {
+		env  map[string]string
+		args []string
+	}{
+		{nil, []string{"--store", dir, "push", "--no-progress", "local"}},
+		{map[string]string{"JACCARD_NO_PROGRESS": "true"}, []string{"--store", dir, "push", "local"}},
+		{nil, []string{"--store", dir, "pull", "--no-progress", "--as", "copy", "remote"}},
+		{map[string]string{"JACCARD_NO_PROGRESS": "1"}, []string{"--store", dir, "pull", "--as", "copy", "remote"}},
+	} {
+		out, shown, err := runBoth(t, &fakeRemote{pullRoot: root}, tc.env, tc.args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if shown != "" {
+			t.Errorf("%v %v: standard error: %q", tc.env, tc.args, shown)
+		}
+		if out == "" {
+			t.Errorf("%v %v: no result on standard output", tc.env, tc.args)
+		}
+	}
+}
+
+func TestAFailedPushMarksTheStepThatFailed(t *testing.T) {
+	dir, _ := storeWithRef(t, "local")
+	f := &fakeRemote{pushErr: errors.New("the bucket answered 403")}
+	out, shown, err := runBoth(t, f, nil, "--store", dir, "push", "local")
+	if err == nil || out != "" {
+		t.Fatalf("push = %q, %v", out, err)
+	}
+	if !strings.Contains(shown, "uploading: failed after ") || strings.Contains(shown, "done in") {
+		t.Errorf("standard error:\n%s", shown)
+	}
+}
+
+func TestAServerThatCannotBeReachedIsTheStepThatFailed(t *testing.T) {
+	dir, _ := storeWithRef(t, "local")
+	var shown bytes.Buffer
+	app := newApp(io.Discard, &shown, func(context.Context, settings) (remote, error) {
+		return nil, errors.New("no route")
+	})
+	if err := app.Run([]string{"jaccard-store", "--store", dir, "push", "local"}); err == nil {
+		t.Fatal("push succeeded without a server")
+	}
+	if got := shown.String(); !strings.Contains(got, "connecting to the server: failed after ") {
+		t.Errorf("standard error:\n%s", got)
 	}
 }

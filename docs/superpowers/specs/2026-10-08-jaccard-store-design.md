@@ -528,8 +528,8 @@ take them.
 
 ```
 jaccard-store --store DIR --server ENDPOINT_ID [--key FILE] COMMAND
-  push [--as NAME] [--min-dedup 0.5] REF
-  pull [--as REF] NAME
+  push [--as NAME] [--min-dedup 0.5] [--no-progress] REF
+  pull [--as REF] [--no-progress] NAME
   ls [PREFIX]
   rm NAME
 ```
@@ -545,6 +545,7 @@ wins when both are set.
 | `--server ENDPOINT_ID` | `JACCARD_SERVER` | required |
 | `--key FILE` | `JACCARD_KEY` | `jaccard-store/client.key` in the user's configuration directory, created on first use |
 | `push --min-dedup F` | `JACCARD_MIN_DEDUP` | `0.5` |
+| `push --no-progress`, `pull --no-progress` | `JACCARD_NO_PROGRESS` | progress is shown |
 
 `--as` has no variable: it names the one ref of one invocation. `AMBER_STORE`
 is read as well because it is what core's own CLI uses for the same
@@ -553,9 +554,46 @@ directory.
 The client resolves the server by ID through pkarr/DNS
 and mDNS and uses the relay as fallback path.
 
+### 9.4 Progress
+
+`client.PushOptions` and `client.PullOptions` take a `Progress`: the client
+tells it each step as it begins (a name, a total and the unit the total is
+counted in: bytes, objects or nothing), how far the step is, and what came
+of it when it ends. A step that fails does not end. Nothing is reported by
+the server; the steps are the client's own.
+
+| | step | counted in |
+| --- | --- | --- |
+| push | reading the tree | objects read, total unknown |
+| | finding nearby packs (`push-start`) | nothing |
+| | comparing nearby packs (the candidates' indexes) | bytes |
+| | packing, and packing shared objects when a base pack is built after all | objects |
+| | uploading (`push-upload`, index and data) | bytes |
+| | verifying on the server (`push-commit`) | nothing |
+| pull | looking up the reference (`pull`) | nothing |
+| | checking the local store, before each pack and at the end | objects checked, total unknown |
+| | fetching the pack, fetching the parent pack | bytes of index and data |
+
+Bytes are counted where they pass the HTTP client. Those of a request that
+fails are taken back, so a part that is sent again counts once.
+
+The command shows the steps on standard error and adds one of its own,
+connecting to the server. On a terminal the running step is one line that
+is redrawn ten times a second: spinner, name, elapsed time and, for a step
+with a total, a bar, the percentage, the amounts, the rate over the last
+ten seconds and the time left at that rate (none in a step's first second).
+Every figure keeps a fixed column; a narrow terminal loses the amounts,
+then the rate, then the bar, and the line never reaches the last column. A
+finished step leaves its line with the time it took and its summary, a
+failed one is marked as failed or interrupted, and a total follows the
+last. Off a terminal a step is a plain line when it ends, and one every
+five seconds while it runs. `--no-progress` shows nothing; the command's
+result goes to standard output either way.
+
 ## 10. Layout
 
 ```
+human/      byte counts, counts and durations as people read them
 keyset/     the order of keys every package agrees on
 sketch/     bottom-k sketch and the Jaccard estimate
 packfile/   index and data: encode, decode, lookup, the pack builder

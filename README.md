@@ -145,9 +145,43 @@ Options come before the argument, as with core's CLI.
 | `--server ENDPOINT_ID` | `JACCARD_SERVER` | required |
 | `--key FILE` | `JACCARD_KEY` | `jaccard-store/client.key` in the user's configuration directory |
 | `push --min-dedup F` | `JACCARD_MIN_DEDUP` | `0.5` |
+| `push --no-progress`, `pull --no-progress` | `JACCARD_NO_PROGRESS` | progress is shown |
 
 The key file is created on first use. Its endpoint ID is what the server
 records as the uploader of a pack.
+
+### Progress
+
+A push and a pull say on standard error what they are doing. Every step
+leaves a line with the time it took and what came of it; the step that is
+running shows its elapsed time and, when it knows how much there is to do,
+a bar, the percentage, the amounts, the rate and the time left:
+
+```
+✓ connecting to the server     1.1s
+✓ reading the tree             0.0s  2,604 objects
+✓ finding nearby packs         0.1s  1 on the server
+✓ comparing nearby packs       0.2s  it holds 152.78 MiB of the reference
+✓ packing                      0.0s  patch pack of 523 objects, 38.16 MiB → 38.17 MiB
+⠹ uploading                      1s  ███████████░░░░░░░░░░░░░░░░   41.1%  15.70 / 38.19 MiB   12.64 MiB/s  eta 2s
+```
+
+The rate is that of the last ten seconds, and the time left follows from
+it. A narrow terminal loses the amounts first, then the rate, then the
+bar. The server's verification of an upload has no bar: the server says
+nothing until it is through, so only the time it has taken is known.
+
+Where standard error is not a terminal, every step is a plain line when it
+ends, and a step that runs long reports every five seconds:
+
+```
+uploading: 45.0%, 55.88 MiB of 124.11 MiB, 9.68 MiB/s, elapsed 6s, eta 7s
+uploading: 124.11 MiB in 2 parts (9.4s)
+```
+
+The result of the command goes to standard output as before.
+`--no-progress` leaves standard error to the errors; `NO_COLOR` keeps the
+marks uncoloured.
 
 A pull fetches the reference's own pack, checks whether the store now holds
 everything, and fetches the parent only if it does not: a store that
