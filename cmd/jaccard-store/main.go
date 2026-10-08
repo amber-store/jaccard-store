@@ -5,7 +5,7 @@
 //	jaccard-store --store DIR --server ENDPOINT_ID pull [--as REF] [--no-progress] NAME
 //	jaccard-store --server ENDPOINT_ID push-dir [--min-dedup F] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR NAME
 //	jaccard-store --server ENDPOINT_ID pull-dir [--temp-dir DIR] [--no-progress] NAME DIR
-//	jaccard-store --server ENDPOINT_ID ls [PREFIX]
+//	jaccard-store --server ENDPOINT_ID ls [PATTERN...]
 //	jaccard-store --server ENDPOINT_ID rm PATTERN...
 //
 // The store is the directory core's own CLI works on (a packstore and a
@@ -174,9 +174,12 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 				Action: func(c *cli.Context) error { return runPullDir(c, connect) },
 			},
 			{
-				Name:      "ls",
-				Usage:     "list the server's references, optionally those whose names begin with PREFIX",
-				ArgsUsage: "[PREFIX]",
+				Name: "ls",
+				Usage: "list the server's references: all of them, or those a PATTERN matches. " +
+					"A PATTERN is what a name begins with, or a pattern as rm takes them, " +
+					"with * (any characters, slashes too), ? (any one), [a-c] (one of these) and \\ (the next character as it is); " +
+					"quote it, or the shell reads it first",
+				ArgsUsage: "[PATTERN...]",
 				Action:    func(c *cli.Context) error { return runList(c, connect) },
 			},
 			{
@@ -320,27 +323,6 @@ func runPull(c *cli.Context, connect dialer) error {
 	}
 	fmt.Fprintf(c.App.Writer, "%s %s: %d packs fetched, %d objects written (%s)\n",
 		ref, res.Root, res.Packs, res.Objects, human.Bytes(res.Bytes))
-	return nil
-}
-
-func runList(c *cli.Context, connect dialer) error {
-	if c.NArg() > 1 {
-		return fmt.Errorf("ls takes at most one argument PREFIX, got %d", c.NArg())
-	}
-	server, err := connect(c.Context, readSettings(c))
-	if err != nil {
-		return err
-	}
-	defer server.Close()
-	refs, err := server.List(c.Context, c.Args().First())
-	if err != nil {
-		return err
-	}
-	for _, r := range refs {
-		if _, err := fmt.Fprintf(c.App.Writer, "%s %s\n", r.Name, r.Root); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
