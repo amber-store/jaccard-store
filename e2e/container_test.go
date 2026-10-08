@@ -166,6 +166,9 @@ func TestMain(m *testing.M) {
 	if minio.image != "" {
 		backends = append(backends, backend{name: minio.name, bucket: minio.bucket, partSize: 5 << 20, strict: true})
 	}
+	if externalConfigured() {
+		backends = append(backends, backend{name: "external", bucket: externalBucket, partSize: 5 << 20, strict: true})
+	}
 	code := m.Run()
 	rustfs.stop()
 	minio.stop()

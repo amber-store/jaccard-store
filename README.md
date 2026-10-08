@@ -215,7 +215,14 @@ are skipped where there is no Docker and with `go test -short`.
 | --- | --- |
 | `JACCARD_TEST_RUSTFS_IMAGE` | another RustFS image than `rustfs/rustfs:1.0.1` |
 | `JACCARD_TEST_MINIO_IMAGE` | run everything against MinIO as well, from this image |
+| `JACCARD_TEST_S3_ENDPOINT`, `JACCARD_TEST_S3_BUCKET` | run everything against a service that exists already, in this bucket, as well |
+| `JACCARD_TEST_S3_ACCESS_KEY_ID`, `JACCARD_TEST_S3_SECRET_ACCESS_KEY` | its credentials |
+| `JACCARD_TEST_S3_REGION`, `JACCARD_TEST_S3_PATH_STYLE` | its region (default `us-east-1`; `auto` on R2) and `false` for virtual-hosted addressing |
 | `JACCARD_TEST_ONLINE=1` | run `TestOnline` in `node/`, which reaches iroh's relays |
+
+Against a service that exists already, such as a bucket on AWS or on
+Cloudflare R2, every test works under a prefix of its own,
+`jaccard-store-test/`, and removes what it left there.
 
 MinIO is not run by default because its own images have left the public
 registries, so there is none to pin. A build by somebody else works, for

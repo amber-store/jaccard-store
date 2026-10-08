@@ -74,7 +74,8 @@ type backend struct {
 
 // backends are the fake in memory, which is always there and checks no
 // signature, and RustFS in a container, which checks what S3 checks. TestMain
-// adds MinIO when an image for it is named.
+// adds MinIO when an image for it is named, and a service that exists
+// already when the environment names one.
 var backends = []backend{
 	{name: "fake", bucket: func(t *testing.T) *bucket.Bucket { return buckettest.New(t) }, partSize: 64 << 10},
 	{name: rustfs.name, bucket: rustfs.bucket, partSize: 5 << 20, strict: true},
