@@ -74,6 +74,48 @@ from the packs it verified. The page is read-only and has no
 authentication, which is why it listens on loopback. On loopback it answers
 only to a loopback address or `localhost` as the host name.
 
+## Docker
+
+A release publishes `ghcr.io/amber-store/jaccard-store` for amd64 and arm64.
+Its entrypoint is `jaccard-stored`; the client, `jaccard-store`, is in the
+image as well.
+
+```sh
+docker run -d --name jaccard \
+  -v jaccard-data:/data \
+  -p 127.0.0.1:8080:8080 \
+  -e JACCARD_S3_BUCKET=my-packs \
+  -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... -e AWS_REGION=eu-central-1 \
+  ghcr.io/amber-store/jaccard-store
+
+docker logs jaccard 2>&1 | grep endpoint=   # the ID clients need
+```
+
+- `/data` holds the server's key, its database and its scratch space. Keep
+  it in a volume: the key is the server's identity, and the database is the
+  only record of the store. The server runs as user 10001; a directory of
+  the host mounted at `/data` has to be writable for that user.
+- The admin page listens on every address inside the container, since
+  loopback there reaches nobody. It has no authentication, so publish its
+  port on the host's loopback, as above, and not on every interface.
+- No port is published for iroh: the server binds a UDP port of its own
+  choosing, and clients reach a container through iroh's relays. Requests
+  are small and pack bytes do not pass through the server, so that costs
+  little. With `--network host` on Linux, direct connections work too.
+- The S3 endpoint the server is given is the one in the URLs it hands to
+  clients. It has to be reachable for them under the same name.
+
+## Releases
+
+Pushing a tag `v*` runs `.github/workflows/release.yml`: it builds the image
+for both platforms, pushes it as `:<tag>` and `:latest`, and creates a
+GitHub release for the tag with notes generated from what was merged since
+the last one. The two commands of a release report the tag with `--version`.
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
 ## Client
 
 The client works on a store directory of core's own CLI (a packstore and a

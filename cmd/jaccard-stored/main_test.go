@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -172,5 +174,20 @@ func TestParseSize(t *testing.T) {
 		if got, err := parseSize(in); err == nil {
 			t.Errorf("parseSize(%q) = %d, want an error", in, got)
 		}
+	}
+}
+
+func TestVersionIsPrinted(t *testing.T) {
+	var out bytes.Buffer
+	app := newApp(io.Discard, func(context.Context, io.Writer, settings) error {
+		t.Fatal("--version started the server")
+		return nil
+	})
+	app.Writer = &out
+	if err := app.Run([]string{"jaccard-stored", "--version"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "jaccard-stored") || !strings.Contains(got, version) {
+		t.Fatalf("--version printed %q, want the name and %q", got, version)
 	}
 }

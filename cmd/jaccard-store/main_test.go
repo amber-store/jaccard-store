@@ -284,3 +284,13 @@ func TestMinDedupMustBeAFraction(t *testing.T) {
 		t.Errorf("--min-dedup 0: %v, %+v", err, f.opts)
 	}
 }
+
+func TestVersionIsPrinted(t *testing.T) {
+	out, err := run(t, &fakeRemote{}, nil, "--version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "jaccard-store") || !strings.Contains(out, version) {
+		t.Fatalf("--version printed %q, want the name and %q", out, version)
+	}
+}

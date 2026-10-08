@@ -31,6 +31,10 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
+// version is the release this binary was built as. A release build sets it
+// with -ldflags "-X main.version=..."; any other build is "dev".
+var version = "dev"
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -84,6 +88,7 @@ func defaultKeyFile() string {
 func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 	return &cli.App{
 		Name:            "jaccard-store",
+		Version:         version,
 		Usage:           "push and pull references of an Amber-Store Core store",
 		Writer:          stdout,
 		ErrWriter:       stderr,

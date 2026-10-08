@@ -30,8 +30,6 @@ output/
 
 !.claude/settings.local.json
 
-# clamp
-/clamp
 *.db
 *.db-wal
 *.db-shm

@@ -1,0 +1,7 @@
+.git
+.github
+.direnv
+docs
+e2e
+result
+*.md

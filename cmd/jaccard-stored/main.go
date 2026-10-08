@@ -48,6 +48,10 @@ const (
 	maxLifetime = 7 * 24 * time.Hour
 )
 
+// version is the release this binary was built as. A release build sets it
+// with -ldflags "-X main.version=..."; any other build is "dev".
+var version = "dev"
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -74,6 +78,7 @@ type settings struct {
 func newApp(stderr io.Writer, run func(context.Context, io.Writer, settings) error) *cli.App {
 	return &cli.App{
 		Name:            "jaccard-stored",
+		Version:         version,
 		Usage:           "serve references as pack files in an S3 bucket, over iroh",
 		ErrWriter:       stderr,
 		HideHelpCommand: true,
