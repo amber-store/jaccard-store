@@ -1,12 +1,14 @@
 -- name: InsertUpload :exec
 INSERT INTO uploads (
     id, name, root, parent_id, uploader, data_key, index_key, links_key,
-    multipart_id, data_size, objects, state, issued_at, deadline
+    multipart_id, data_size, objects, state, issued_at, deadline,
+    shared_objects, shared_bytes
 ) VALUES (
     sqlc.arg(id), sqlc.arg(name), sqlc.arg(root), sqlc.narg(parent_id),
     sqlc.arg(uploader), sqlc.arg(data_key), sqlc.arg(index_key),
     sqlc.arg(links_key), sqlc.narg(multipart_id), sqlc.arg(data_size),
-    sqlc.arg(objects), sqlc.arg(state), sqlc.arg(issued_at), sqlc.arg(deadline)
+    sqlc.arg(objects), sqlc.arg(state), sqlc.arg(issued_at), sqlc.arg(deadline),
+    sqlc.arg(shared_objects), sqlc.arg(shared_bytes)
 );
 
 -- name: UploadByID :one

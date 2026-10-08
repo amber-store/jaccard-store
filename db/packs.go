@@ -12,8 +12,9 @@ import (
 	"github.com/amber-store/jaccard-store/sketch"
 )
 
-// Pack is a verified pack: the content of one root, as the server measured
-// it.
+// Pack is a recorded pack: the content of one root, as the server measured
+// it, or, for a pack that is not Verified, as its index and the client that
+// uploaded it have it.
 type Pack struct {
 	ID            int64
 	Root          key.Key
@@ -30,6 +31,12 @@ type Pack struct {
 	SharedBytes   int64
 	Uploader      string
 	UploadedAt    time.Time
+	// Verified says that the server read the pack's data and walked it from
+	// the root. A pack that is not was recorded by a server run without
+	// verification: nothing but its index was read, a base pack of the kind
+	// has no links, and what a patch pack shares with its parent is the
+	// client's figure.
+	Verified bool
 }
 
 // IsBase reports whether p is a base pack: it has no parent and holds the
@@ -70,6 +77,7 @@ func packOf(r packRow) (Pack, error) {
 		SharedBytes:   r.SharedBytes,
 		Uploader:      r.Uploader,
 		UploadedAt:    timeOf(r.UploadedAt),
+		Verified:      r.Verified != 0,
 	}, nil
 }
 

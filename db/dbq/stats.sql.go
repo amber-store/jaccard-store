@@ -45,20 +45,23 @@ SELECT count(parent_id) AS patch_packs,
        count(*) - count(parent_id) AS base_packs,
        CAST(COALESCE(sum(bytes), 0) AS INTEGER) AS pack_bytes,
        CAST(COALESCE(sum(data_size), 0) AS INTEGER) AS data_bytes,
-       CAST(COALESCE(sum(index_size + links_size), 0) AS INTEGER) AS index_bytes
+       CAST(COALESCE(sum(index_size + links_size), 0) AS INTEGER) AS index_bytes,
+       CAST(COALESCE(sum(1 - verified), 0) AS INTEGER) AS unverified_packs
 FROM packs
 `
 
 type PackTotalsRow struct {
-	PatchPacks int64
-	BasePacks  int64
-	PackBytes  int64
-	DataBytes  int64
-	IndexBytes int64
+	PatchPacks      int64
+	BasePacks       int64
+	PackBytes       int64
+	DataBytes       int64
+	IndexBytes      int64
+	UnverifiedPacks int64
 }
 
 // Every pack once: how many of each kind there are, what their objects come
-// to as they are, and what the bucket holds of them.
+// to as they are, what the bucket holds of them, and how many of them were
+// recorded without being verified.
 func (q *Queries) PackTotals(ctx context.Context) (PackTotalsRow, error) {
 	row := q.db.QueryRowContext(ctx, packTotals)
 	var i PackTotalsRow
@@ -68,6 +71,7 @@ func (q *Queries) PackTotals(ctx context.Context) (PackTotalsRow, error) {
 		&i.PackBytes,
 		&i.DataBytes,
 		&i.IndexBytes,
+		&i.UnverifiedPacks,
 	)
 	return i, err
 }

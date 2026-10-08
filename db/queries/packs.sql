@@ -5,28 +5,28 @@
 INSERT INTO packs (
     root, parent_id, data_key, index_key, links_key, data_size, index_size,
     links_size, objects, bytes, shared_objects, shared_bytes, uploader,
-    uploaded_at, sketch, unpacked
+    uploaded_at, sketch, unpacked, verified
 ) VALUES (
     sqlc.arg(root), sqlc.narg(parent_id), sqlc.arg(data_key),
     sqlc.arg(index_key), sqlc.narg(links_key), sqlc.arg(data_size),
     sqlc.arg(index_size), sqlc.arg(links_size), sqlc.arg(objects),
     sqlc.arg(bytes), sqlc.arg(shared_objects), sqlc.arg(shared_bytes),
     sqlc.arg(uploader), sqlc.arg(uploaded_at), sqlc.narg(sketch),
-    sqlc.arg(unpacked)
+    sqlc.arg(unpacked), sqlc.arg(verified)
 )
 RETURNING id;
 
 -- name: PackByID :one
 SELECT id, root, parent_id, data_key, index_key, links_key, data_size,
        index_size, links_size, objects, bytes, shared_objects, shared_bytes,
-       uploader, uploaded_at
+       uploader, uploaded_at, verified
 FROM packs
 WHERE id = sqlc.arg(id);
 
 -- name: PackByRoot :one
 SELECT id, root, parent_id, data_key, index_key, links_key, data_size,
        index_size, links_size, objects, bytes, shared_objects, shared_bytes,
-       uploader, uploaded_at
+       uploader, uploaded_at, verified
 FROM packs
 WHERE root = sqlc.arg(root);
 
@@ -61,7 +61,7 @@ RETURNING parent_id, data_key, index_key, links_key;
 -- name: ListPacks :many
 SELECT p.id, p.root, p.parent_id, p.data_key, p.index_key, p.links_key,
        p.data_size, p.index_size, p.links_size, p.objects, p.bytes,
-       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at,
+       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at, p.verified,
        parent.root AS parent_root,
        (SELECT count(*) FROM refs AS r WHERE r.pack_id = p.id) AS refs,
        (SELECT count(*) FROM packs AS c WHERE c.parent_id = p.id) AS children
@@ -80,7 +80,7 @@ SELECT root FROM packs WHERE parent_id = sqlc.arg(parent_id) ORDER BY root;
 -- packs leaning on it uses, 0 when none leans on it.
 SELECT p.id, p.root, p.parent_id, p.data_key, p.index_key, p.links_key,
        p.data_size, p.index_size, p.links_size, p.objects, p.bytes,
-       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at,
+       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at, p.verified,
        parent.root AS parent_root,
        count(*) AS refs,
        (SELECT count(*) FROM packs AS c WHERE c.parent_id = p.id) AS children,
@@ -97,7 +97,7 @@ LIMIT sqlc.arg(n);
 -- the older. Only a base pack is leaned on, so none of them has a parent.
 SELECT p.id, p.root, p.parent_id, p.data_key, p.index_key, p.links_key,
        p.data_size, p.index_size, p.links_size, p.objects, p.bytes,
-       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at,
+       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at, p.verified,
        (SELECT count(*) FROM refs AS r WHERE r.pack_id = p.id) AS refs,
        count(*) AS children,
        CAST(max(c.shared_bytes) AS INTEGER) AS largest_share

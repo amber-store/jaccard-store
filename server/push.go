@@ -133,6 +133,9 @@ func (s *Server) pushUpload(ctx context.Context, remote string, req wire.Request
 	if req.Bytes > s.maxPackBytes {
 		return wire.Errorf(wire.CodeBadRequest, "bytes: a pack of %d bytes is above this server's limit of %d", req.Bytes, s.maxPackBytes)
 	}
+	if parent == nil && (req.SharedObjects != 0 || req.SharedBytes != 0) {
+		return wire.Errorf(wire.CodeBadRequest, "shared_objects, shared_bytes: there is no parent to share with")
+	}
 
 	now := s.now()
 	stored, err := s.db.PointRef(ctx, name, root, remote, now, s.collectAt(now))
@@ -157,6 +160,11 @@ func (s *Server) pushUpload(ctx context.Context, remote string, req wire.Request
 		LinksKey: s.bucket.Key(root, id, extLinks),
 		DataSize: int64(req.DataSize),
 		Objects:  int64(req.Objects),
+		// A figure too large for an int64 turns negative here, and is
+		// refused with the others that cannot be true.
+		SharedObjects: int64(req.SharedObjects),
+		SharedBytes:   int64(req.SharedBytes),
+
 		State:    db.StatePending,
 		IssuedAt: now,
 		Deadline: now.Add(s.uploadTimeout),
@@ -177,6 +185,9 @@ func (s *Server) pushUpload(ctx context.Context, remote string, req wire.Request
 		}
 		if errors.Is(err, db.ErrParentGone) {
 			return wire.Errorf(wire.CodeParentGone, "parent %s is not a base pack of this store", parent)
+		}
+		if errors.Is(err, db.ErrShared) {
+			return wire.Errorf(wire.CodeBadRequest, "shared_objects, shared_bytes: more than the parent holds")
 		}
 		return s.internal("recording the upload", err)
 	}

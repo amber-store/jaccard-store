@@ -17,7 +17,9 @@
 // A sound base pack yields its links: the children of every object, as index
 // positions. A sound patch pack is measured against its parent's links: the
 // parent's objects reachable from the keys at which the walk crossed into
-// the parent are what the reference shares with it.
+// the parent are what the reference shares with it. A parent that has no
+// links, because it was recorded without being verified, cannot be measured
+// against: the patch pack is verified all the same, and not measured.
 package verify
 
 import (
@@ -40,7 +42,8 @@ type Result struct {
 	// Objects and Bytes are those of the pack, from its index.
 	Objects, Bytes uint64
 	// SharedObjects and SharedBytes are those of the reference that the
-	// parent holds. Both are 0 for a base pack.
+	// parent holds. Both are 0 for a base pack, and for a patch pack whose
+	// parent came without links.
 	SharedObjects, SharedBytes uint64
 	// Links holds the children of every object of a base pack. It is nil for
 	// a patch pack.
@@ -57,16 +60,17 @@ func (b bitmap) has(i int) bool { return b[i/64]&(1<<(i%64)) != 0 }
 func (b bitmap) set(i int) { b[i/64] |= 1 << (i % 64) }
 
 // Pack verifies the pack of root with index x and measures it. data is the
-// uncompressed stream, x.DataSize() bytes long. parent and parentLinks are
-// nil for a base pack and both set, to the index and the links of the
-// parent, for a patch pack. A pack that fails is reported with an error
-// wrapping ErrMalformed; any other error is a failure to read data, returned
-// as it is, or a parent that was not given whole.
+// uncompressed stream, x.DataSize() bytes long. parent is nil for a base
+// pack and the index of the parent for a patch pack; parentLinks are the
+// links of that parent, or nil if it has none, in which case what the pack
+// shares with it is not measured. A pack that fails is reported with an
+// error wrapping ErrMalformed; any other error is a failure to read data,
+// returned as it is, or links that are not those of the parent.
 func Pack(root key.Key, x *packfile.Index, data io.ReaderAt, parent *packfile.Index, parentLinks *packfile.Links) (Result, error) {
-	if (parent == nil) != (parentLinks == nil) {
-		return Result{}, errors.New("verify: a patch pack needs both the index and the links of its parent")
+	if parent == nil && parentLinks != nil {
+		return Result{}, errors.New("verify: links of a parent, and no parent")
 	}
-	if parent != nil && parentLinks.Len() != parent.Len() {
+	if parentLinks != nil && parentLinks.Len() != parent.Len() {
 		return Result{}, fmt.Errorf("verify: the parent's links are for %d objects, its index has %d", parentLinks.Len(), parent.Len())
 	}
 	n := x.Len()
@@ -155,6 +159,9 @@ func Pack(root key.Key, x *packfile.Index, data io.ReaderAt, parent *packfile.In
 	res := Result{Objects: uint64(n), Bytes: x.DataSize()}
 	if parent == nil {
 		res.Links = packfile.NewLinks(children)
+		return res, nil
+	}
+	if parentLinks == nil {
 		return res, nil
 	}
 	for len(crossings) > 0 {

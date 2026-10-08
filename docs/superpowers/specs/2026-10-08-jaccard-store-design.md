@@ -44,9 +44,12 @@ and the admin page shows what the store holds and who put it there.
 - **Validation**: the server downloads the new pack and walks its objects
   from the root. Only the new pack is walked; where a path crosses into the
   parent, the key's presence in the parent's index is enough, and the parent
-  is assumed sound.
+  is assumed sound. Later the owner made it a thing a server can be run
+  without (`--no-verify`, section 6.1).
 - The **statistics are computed by the server**, never reported by the
-  client.
+  client. One figure became an exception with `--no-verify`, by the owner's
+  choice: what a pack shares with its parent is the client's count where
+  the server could not measure it (section 6.1).
 - CLI on `urfave/cli/v2`.
 - Licensed `LGPL-3.0-only`, as clamp is: `LICENSE` holds the LGPL, `COPYING`
   the GPL it incorporates.
@@ -55,7 +58,7 @@ and the admin page shows what the store holds and who put it there.
 
 - The index starts with an 8-byte magic and version before the key count.
 - The sketch travels once, in `push-start`. For a base pack the server takes
-  the sketch from the verified index, not from the client.
+  the sketch from the pack's index, not from the client's request.
 - The client decides between a base and a patch pack, and on the parent of
   a patch pack (section 9.1). The server enforces structure only.
 - Every object the walk reads is hashed against its key, blobs included, and
@@ -136,7 +139,8 @@ back, each once, in any order, with no framing. The window is at most
 ### 4.3 Links
 
 Base packs only. The server writes the links after it has verified the
-pack; clients never read them. They record, for every object of the pack,
+pack, so a base pack that was recorded without verification (section 6.1)
+has none; clients never read them. They record, for every object of the pack,
 which objects it refers to, as positions in the index:
 
 ```
@@ -192,11 +196,17 @@ then to the lower root.
 
 Request: `name`, `root`, `parent` (root of a base pack, or absent),
 `data_size` (bytes of the compressed data), `objects` (index entries),
-`bytes` (the uncompressed size of the data).
+`bytes` (the uncompressed size of the data), and `shared_objects` and
+`shared_bytes`: of the parent's objects, the ones the reference is made of,
+and their uncompressed bytes. The last two are for a server that does not
+measure them itself (section 6.1); a client that leaves them out says
+nothing is shared.
 
 A `data_size` above 5 TiB, which is the largest object S3 holds, and `bytes`
 above the server's largest pack size are a `bad_request`, before anything is
-uploaded.
+uploaded. So are shared figures that cannot be true: more objects or more
+bytes than the parent holds, or any without a parent. They are added up
+with what the server measured, and one absurd figure would spoil the sums.
 
 - If the root has a pack by now: as `stored` above.
 - If `parent` is not a base pack the server knows: `parent_gone`. The client
@@ -231,9 +241,11 @@ Request: `upload_id`. Only the endpoint that opened the upload may commit
 it; for anyone else, and for an upload that has expired, the answer is
 `unknown_upload`.
 
-The server verifies the pack (section 6). On success it records the pack,
-points the ref at it, and answers `ok`. If the root got a pack in the
-meantime, the upload's objects are queued for deletion, the ref is pointed
+The server verifies the pack (section 6), or, run without verification,
+sees that it was uploaded (section 6.1). On success it records the pack,
+points the ref at it, and answers with the `root` and, if the pack the ref
+now points at was recorded without verification, with `unverified`. If the
+root got a pack in the meantime, the upload's objects are queued for deletion, the ref is pointed
 at the existing pack, and the answer is `ok` as well. An upload that was
 not verified is never recorded: if that other pack is collected before the
 commit lands, the upload is verified after all. A pack that fails
@@ -297,6 +309,57 @@ A pack that passed is then measured (section 8):
   bytes. The parent's data is not read. Verifications run a few at a
 time (default 2), which bounds the scratch space to the uncompressed size of
 that many packs. The scratch directory is emptied at start.
+
+### 6.1 Without verification
+
+A verification downloads every pack that is pushed and writes it out
+uncompressed. A server started with `--no-verify` does neither. At
+`push-commit` it does steps 1 and 2 above and then one thing more that
+the index allows: the root has to be in the pack, unless the pack is an
+empty patch pack. The data is not read. Whether the objects are what their
+keys say, whether they are all the root needs, whether a patch pack holds
+keys its parent has too, and whether the parent of an empty patch pack
+holds its root, is the word of the client. Commits are still looked at a
+few at a time (`--verify-jobs`): each holds the index of its pack in
+memory.
+
+What follows from that:
+
+- **A pack that is incomplete or corrupt is recorded** like any other, and
+  refs point at it. The client still checks every object against its key
+  when it pulls and the whole tree for completeness afterwards (section
+  9.2), so such a pack is found by whoever pulls it, not by whoever pushed
+  it. A base pack that is unsound is unsound for every patch pack on it.
+  Access is open (section 2.1): this is for a server whose clients are
+  trusted to push what they say.
+- **Such a pack is marked** (`packs.verified = 0`), the answer to
+  `push-commit` says `unverified`, the client says so where it reports a
+  push, and the admin page shows the packs and the references concerned
+  and counts them.
+- **A base pack gets no links**, which come of the walk. Its sketch comes
+  from its index as always, so it is offered as a parent like any other.
+  The upload's links key is queued for deletion all the same: a server
+  that verified may have written links for the upload and then failed to
+  commit it.
+- **What a patch pack shares with its parent is the client's count**
+  (`shared_objects`, `shared_bytes` of `push-upload`). The client has it
+  from choosing the parent: the keys of the reference that are in the
+  parent's index, and their lengths there. For a sound pack on a sound
+  parent it is the figure a verification measures. It is used for the
+  statistics alone; nothing the server does depends on it.
+
+The setting belongs to a run of the server, not to the store: one store
+may hold packs of both kinds. A server that verifies, on a store with packs
+that were not:
+
+- verifies a patch pack on an unverified base pack as any other, since the
+  walk needs the parent's index and nothing else of it. It cannot measure
+  what the two share without the parent's links, and records the client's
+  count for that pack too;
+- leaves what was recorded as it is. A root that has a pack is never
+  uploaded again (section 5.1), so pushing it once more does not verify
+  it. A pack that was not verified stays so until it is collected.
+
 
 ## 7. Server
 
@@ -366,10 +429,19 @@ CREATE TABLE deletions (
 );
 ```
 
-Every figure of a pack is the server's own: `objects` and `bytes` come from
-the verified index, `shared_objects` and `shared_bytes` from the parent's
-links (section 6). The sketch of a base pack is the first 256 keys of its
-index.
+Later migrations add to this: `packs.unpacked` (migration 2, section 8),
+and with migration 3 `packs.verified`, 1 for every pack but those a server
+recorded without verification, and `uploads.shared_objects` and
+`uploads.shared_bytes`, the client's count of what its reference has of
+the parent (section 6.1).
+
+Every figure of a verified pack is the server's own: `objects` and `bytes`
+come from the verified index, `shared_objects` and `shared_bytes` from the
+parent's links (section 6). The sketch of a base pack is the first 256 keys
+of its index. A pack that was not verified has `objects` and `bytes` from
+an index nobody held against the data, and `shared_objects` and
+`shared_bytes` from its client; so has a verified patch pack whose parent
+was not verified and has no links to measure by.
 
 An upload owns three keys from the start, `.idx`, `.data` and `.links`,
 whether or not all of them get written. Whatever ends an upload without a
@@ -435,12 +507,15 @@ wins when both are set.
 | `--url-ttl D` | `JACCARD_URL_TTL` | `1h` |
 | `--part-size N` | `JACCARD_PART_SIZE` | `64MiB` |
 | `--verify-jobs N` | `JACCARD_VERIFY_JOBS` | `2` |
+| `--no-verify` | `JACCARD_NO_VERIFY` | off: every pack is verified |
 | `--max-pack-size N` | `JACCARD_MAX_PACK_SIZE` | `16GiB` |
 | `--bind IP:PORT` | `JACCARD_BIND` | every address, a port the system picks |
 
 The two durations are lifetimes of pre-signed URLs and have to lie between
 one second and seven days. The scratch space a server needs is
-`--max-pack-size` times `--verify-jobs`.
+`--max-pack-size` times `--verify-jobs`; with `--no-verify` it needs none,
+and logs a warning at start that it records packs as they come (section
+6.1).
 
 Credentials come from the SDK's default chain, which reads the usual
 `AWS_*` variables.
@@ -499,6 +574,14 @@ gone.
 bucket and in none of the sizes; the server does not record what they
 weigh. Their counts are shown.
 
+**Packs that were not verified** (section 6.1) are in every size like the
+others. What differs is where "one pack per ref" has its `shared_bytes`
+from for a patch pack among them, or on one of them: from the client that
+uploaded it. The overview counts such packs when there are any and says
+so under the chain; a pack and a reference carry a mark, a reference when
+its own pack or the parent of that was not verified; and the detail of a
+patch pack says whose count its share of the parent is.
+
 Per ref, the same sizes for itself: unpacked; as objects (`objects +
 shared_objects`, `bytes + shared_bytes`); in its own pack (`objects`,
 `bytes`, and `data_size` in S3); from its parent (`shared_objects`,
@@ -547,10 +630,13 @@ refs), and the open uploads.
 4. Write the objects the parent lacks into a temporary data file through
    one zstd encoder: that is the patch pack. Without a parent every object
    is written and the pack is a base pack.
-5. `push-upload`, then PUT the index and the data (parts in parallel, each
-   a section of the file; the ETags go into the completion POST, whose
-   answer is checked for an error body).
-6. `push-commit`.
+5. `push-upload`, with what the reference has of the parent chosen (the
+   objects and bytes counted in step 3), then PUT the index and the data
+   (parts in parallel, each a section of the file; the ETags go into the
+   completion POST, whose answer is checked for an error body).
+6. `push-commit`. If the answer says `unverified`, the result of the push
+   says so (`PushResult.Unverified`), and the command adds it to the line
+   it prints for the push.
 
 On `parent_gone` the push starts over once.
 
@@ -684,7 +770,7 @@ the server; the steps are the client's own.
 | | comparing nearby packs (the candidates' indexes), which ends with the parent chosen or why there is none | bytes |
 | | packing | objects |
 | | uploading (`push-upload`, index and data) | bytes |
-| | verifying on the server (`push-commit`) | nothing |
+| | verifying on the server (`push-commit`), which ends at once and says so when the server does not verify | nothing |
 | pull | looking up the reference (`pull`) | nothing |
 | | checking the local store, before each pack and at the end | objects checked, total unknown |
 | | fetching the pack, fetching the parent pack | bytes of index and data |
@@ -867,7 +953,8 @@ Tests are written before the code they cover.
   The measuring has its own: the links of a base pack round-trip, and the
   shared objects and bytes of a patch pack equal those of a key set
   computed directly, including for an empty patch pack and for a parent
-  object reached along two paths.
+  object reached along two paths. A patch pack on a parent without links
+  is verified and refused as with them, and comes out unmeasured.
 - End to end, in one process: a server with real iroh endpoints on loopback
   (relays and discovery off, direct addresses given through the library) and
   an in-process S3 fake, driven through the client library. Covered: a base
@@ -876,13 +963,24 @@ Tests are written before the code they cover.
   refused and removed; the multipart path with a small part size; two
   clients pushing one root at once; a pull that skips the parent; a small
   reference that is not hung on a large pack, and its next version, which
-  leans on the small pack instead.
+  leans on the small pack instead. Against a server that does not verify:
+  the round trip of a base and a patch pack, with the client's count of
+  what they share held against the key sets; and a pack with an object
+  missing, which is recorded and which the pull then refuses.
+- `server`, without verification: that nothing but the index is read and
+  no links are written; that a pack a verification refuses is recorded and
+  marked; what is still refused (an object that was not uploaded or has
+  another size, an index that is none or lacks the root); shared figures
+  that cannot be true; that a verifying server does not take the client's
+  count; and a verifying server on a store whose base pack was not
+  verified.
 - `admin`: the API through `httptest`. The page has no tests of its own:
   after a change it is looked at in a browser, over a store with patch
   packs, refs that share a pack and a pack no ref points at.
 - `db`: the sizes of the chain over a store with all of those, and a
   database as the first release left it, which gets the unpacked size of
-  every pack when this release opens it.
+  every pack when this release opens it, and has every pack marked as
+  verified.
 - The command: its flags and variables against a server that records what
   it is asked, the patterns of `ls` and `rm` among them (each kind of
   pattern, a star across slashes, several arguments, one that matches
@@ -927,3 +1025,6 @@ one server on a bucket; more than one level of parents.
   It has to be backed up; the bucket alone does not describe the store.
 - A verification needs scratch space for the uncompressed pack.
 - A pull that needs the parent downloads all of it.
+- A pack recorded without verification (section 6.1) is never verified
+  later: there is no way to have a server walk a pack it already holds.
+  Whether such a pack is sound is known once a client has pulled it.

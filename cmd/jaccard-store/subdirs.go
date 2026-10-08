@@ -172,7 +172,15 @@ func outcome(res client.PushResult) string {
 	case res.Stored:
 		return "the server has the pack already"
 	case res.Parent != nil:
-		return "patch pack, " + human.Bytes(res.DataSize)
+		return "patch pack, " + human.Bytes(res.DataSize) + unverified(res)
 	}
-	return "base pack, " + human.Bytes(res.DataSize)
+	return "base pack, " + human.Bytes(res.DataSize) + unverified(res)
+}
+
+// unverified is what outcome adds for a pack the server took as it came.
+func unverified(res client.PushResult) string {
+	if res.Unverified {
+		return ", not verified"
+	}
+	return ""
 }

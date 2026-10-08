@@ -31,6 +31,10 @@ type Stats struct {
 	Refs, BasePacks, PatchPacks, Uploads, Deletions int64
 	// UnreferencedPacks are the packs no ref points at.
 	UnreferencedPacks int64
+	// UnverifiedPacks are the packs recorded without being verified. What
+	// ObjectBytes has of a patch pack among them, and of a patch pack whose
+	// parent is among them, is the figure of the client that uploaded it.
+	UnverifiedPacks int64
 
 	UnpackedBytes int64 // over refs: the tree of each, as its root key sizes it
 	ObjectBytes   int64 // over refs: bytes + shared_bytes of the pack
@@ -66,6 +70,7 @@ func (d *DB) Stats(ctx context.Context) (s Stats, err error) {
 			return err
 		}
 		s.BasePacks, s.PatchPacks = packs.BasePacks, packs.PatchPacks
+		s.UnverifiedPacks = packs.UnverifiedPacks
 		s.PackBytes, s.DataBytes, s.IndexBytes = packs.PackBytes, packs.DataBytes, packs.IndexBytes
 		unreferenced, err := q.UnreferencedTotals(ctx)
 		if err != nil {
@@ -168,6 +173,7 @@ func (d *DB) ListPacks(ctx context.Context, afterID int64, limit int) ([]PackInf
 				SharedBytes:   r.SharedBytes,
 				Uploader:      r.Uploader,
 				UploadedAt:    r.UploadedAt,
+				Verified:      r.Verified,
 			})
 			if err != nil {
 				return err
@@ -215,6 +221,7 @@ func (d *DB) TopPacks(ctx context.Context, n int) (byRefs, byChildren []TopPack,
 				ID: r.ID, Root: r.Root, ParentID: r.ParentID, DataKey: r.DataKey, IndexKey: r.IndexKey, LinksKey: r.LinksKey,
 				DataSize: r.DataSize, IndexSize: r.IndexSize, LinksSize: r.LinksSize, Objects: r.Objects, Bytes: r.Bytes,
 				SharedObjects: r.SharedObjects, SharedBytes: r.SharedBytes, Uploader: r.Uploader, UploadedAt: r.UploadedAt,
+				Verified: r.Verified,
 			}
 			if byRefs[i], err = topPackOf(row, r.ParentRoot, r.Refs, r.Children, r.LargestShare); err != nil {
 				return err
@@ -230,6 +237,7 @@ func (d *DB) TopPacks(ctx context.Context, n int) (byRefs, byChildren []TopPack,
 				ID: r.ID, Root: r.Root, ParentID: r.ParentID, DataKey: r.DataKey, IndexKey: r.IndexKey, LinksKey: r.LinksKey,
 				DataSize: r.DataSize, IndexSize: r.IndexSize, LinksSize: r.LinksSize, Objects: r.Objects, Bytes: r.Bytes,
 				SharedObjects: r.SharedObjects, SharedBytes: r.SharedBytes, Uploader: r.Uploader, UploadedAt: r.UploadedAt,
+				Verified: r.Verified,
 			}
 			if byChildren[i], err = topPackOf(row, nil, r.Refs, r.Children, r.LargestShare); err != nil {
 				return err

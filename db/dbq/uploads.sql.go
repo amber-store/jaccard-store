@@ -71,7 +71,7 @@ func (q *Queries) DueDeletions(ctx context.Context, arg DueDeletionsParams) ([]D
 }
 
 const expiredUploads = `-- name: ExpiredUploads :many
-SELECT id, name, root, parent_id, uploader, data_key, index_key, links_key, multipart_id, data_size, objects, state, issued_at, deadline FROM uploads
+SELECT id, name, root, parent_id, uploader, data_key, index_key, links_key, multipart_id, data_size, objects, state, issued_at, deadline, shared_objects, shared_bytes FROM uploads
 WHERE state = 'pending' AND deadline < ?1
 ORDER BY id
 `
@@ -101,6 +101,8 @@ func (q *Queries) ExpiredUploads(ctx context.Context, now int64) ([]Upload, erro
 			&i.State,
 			&i.IssuedAt,
 			&i.Deadline,
+			&i.SharedObjects,
+			&i.SharedBytes,
 		); err != nil {
 			return nil, err
 		}
@@ -134,30 +136,34 @@ func (q *Queries) InsertDeletion(ctx context.Context, arg InsertDeletionParams) 
 const insertUpload = `-- name: InsertUpload :exec
 INSERT INTO uploads (
     id, name, root, parent_id, uploader, data_key, index_key, links_key,
-    multipart_id, data_size, objects, state, issued_at, deadline
+    multipart_id, data_size, objects, state, issued_at, deadline,
+    shared_objects, shared_bytes
 ) VALUES (
     ?1, ?2, ?3, ?4,
     ?5, ?6, ?7,
     ?8, ?9, ?10,
-    ?11, ?12, ?13, ?14
+    ?11, ?12, ?13, ?14,
+    ?15, ?16
 )
 `
 
 type InsertUploadParams struct {
-	ID          string
-	Name        string
-	Root        []byte
-	ParentID    sql.NullInt64
-	Uploader    string
-	DataKey     string
-	IndexKey    string
-	LinksKey    string
-	MultipartID sql.NullString
-	DataSize    int64
-	Objects     int64
-	State       string
-	IssuedAt    int64
-	Deadline    int64
+	ID            string
+	Name          string
+	Root          []byte
+	ParentID      sql.NullInt64
+	Uploader      string
+	DataKey       string
+	IndexKey      string
+	LinksKey      string
+	MultipartID   sql.NullString
+	DataSize      int64
+	Objects       int64
+	State         string
+	IssuedAt      int64
+	Deadline      int64
+	SharedObjects int64
+	SharedBytes   int64
 }
 
 func (q *Queries) InsertUpload(ctx context.Context, arg InsertUploadParams) error {
@@ -176,12 +182,14 @@ func (q *Queries) InsertUpload(ctx context.Context, arg InsertUploadParams) erro
 		arg.State,
 		arg.IssuedAt,
 		arg.Deadline,
+		arg.SharedObjects,
+		arg.SharedBytes,
 	)
 	return err
 }
 
 const listUploads = `-- name: ListUploads :many
-SELECT id, name, root, parent_id, uploader, data_key, index_key, links_key, multipart_id, data_size, objects, state, issued_at, deadline FROM uploads ORDER BY issued_at, id
+SELECT id, name, root, parent_id, uploader, data_key, index_key, links_key, multipart_id, data_size, objects, state, issued_at, deadline, shared_objects, shared_bytes FROM uploads ORDER BY issued_at, id
 `
 
 func (q *Queries) ListUploads(ctx context.Context) ([]Upload, error) {
@@ -208,6 +216,8 @@ func (q *Queries) ListUploads(ctx context.Context) ([]Upload, error) {
 			&i.State,
 			&i.IssuedAt,
 			&i.Deadline,
+			&i.SharedObjects,
+			&i.SharedBytes,
 		); err != nil {
 			return nil, err
 		}
@@ -249,7 +259,7 @@ func (q *Queries) SetUploadState(ctx context.Context, arg SetUploadStateParams) 
 }
 
 const uploadByID = `-- name: UploadByID :one
-SELECT id, name, root, parent_id, uploader, data_key, index_key, links_key, multipart_id, data_size, objects, state, issued_at, deadline FROM uploads WHERE id = ?1
+SELECT id, name, root, parent_id, uploader, data_key, index_key, links_key, multipart_id, data_size, objects, state, issued_at, deadline, shared_objects, shared_bytes FROM uploads WHERE id = ?1
 `
 
 func (q *Queries) UploadByID(ctx context.Context, id string) (Upload, error) {
@@ -270,6 +280,8 @@ func (q *Queries) UploadByID(ctx context.Context, id string) (Upload, error) {
 		&i.State,
 		&i.IssuedAt,
 		&i.Deadline,
+		&i.SharedObjects,
+		&i.SharedBytes,
 	)
 	return i, err
 }

@@ -11,8 +11,9 @@
 //
 //	push-start   name, root, sketch              stored | candidates
 //	push-upload  name, root, parent, data_size,  stored | upload_id, deadline,
-//	             objects, bytes                  index_url, data_url | parts
-//	push-commit  upload_id                       root
+//	             objects, bytes, shared_objects, index_url, data_url | parts
+//	             shared_bytes
+//	push-commit  upload_id                       root, unverified
 //	pull         name                            root, packs
 //	list         prefix, after, limit            refs, more
 //	delete       name
@@ -69,7 +70,8 @@ const (
 	// CodeUnknownUpload: the upload expired, never was, or is another
 	// endpoint's.
 	CodeUnknownUpload = "unknown_upload"
-	// CodeMalformedPack: the uploaded pack failed verification and is gone.
+	// CodeMalformedPack: the uploaded pack failed verification, or is not
+	// all there, and is gone.
 	CodeMalformedPack = "malformed_pack"
 	// CodeInternal: the server could not do its part; the request may be
 	// repeated.
@@ -88,11 +90,17 @@ type Request struct {
 	// Bytes is the uncompressed size of the pack's data: the sum of the
 	// lengths in its index. A server that takes no pack that large says so
 	// before anything is uploaded.
-	Bytes    uint64 `cbor:"bytes,omitempty"`
-	UploadID string `cbor:"upload_id,omitempty"`
-	Prefix   string `cbor:"prefix,omitempty"`
-	After    string `cbor:"after,omitempty"`
-	Limit    int    `cbor:"limit,omitempty"`
+	Bytes uint64 `cbor:"bytes,omitempty"`
+	// SharedObjects and SharedBytes are what the reference has in common
+	// with the parent named: the objects of the parent that the reference
+	// is made of, and their uncompressed bytes. A server that verifies the
+	// pack measures them itself; one that does not records these.
+	SharedObjects uint64 `cbor:"shared_objects,omitempty"`
+	SharedBytes   uint64 `cbor:"shared_bytes,omitempty"`
+	UploadID      string `cbor:"upload_id,omitempty"`
+	Prefix        string `cbor:"prefix,omitempty"`
+	After         string `cbor:"after,omitempty"`
+	Limit         int    `cbor:"limit,omitempty"`
 }
 
 // Response is what a server answers.
@@ -107,9 +115,13 @@ type Response struct {
 	DataURL  string `cbor:"data_url,omitempty"`
 	Parts    *Parts `cbor:"parts,omitempty"`
 	Root     []byte `cbor:"root,omitempty"`
-	Packs    []Pack `cbor:"packs,omitempty"`
-	Refs     []Ref  `cbor:"refs,omitempty"`
-	More     bool   `cbor:"more,omitempty"`
+	// Unverified says, in the answer to push-commit, that the pack the
+	// reference points at was recorded without being verified: the server
+	// saw that it was uploaded and read no more of it than its index.
+	Unverified bool   `cbor:"unverified,omitempty"`
+	Packs      []Pack `cbor:"packs,omitempty"`
+	Refs       []Ref  `cbor:"refs,omitempty"`
+	More       bool   `cbor:"more,omitempty"`
 }
 
 // Error is a refusal. It is an error, so a client can return it as it came.

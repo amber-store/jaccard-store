@@ -117,6 +117,7 @@ func TestStats(t *testing.T) {
 	header := s.get(t, "/api/stats", http.StatusOK, &got)
 	want := map[string]float64{
 		"refs": 3, "base_packs": 1, "patch_packs": 1, "unreferenced_packs": 0, "uploads": 1, "deletions": 0,
+		"unverified_packs": 0,
 		// The chain: every reference unpacked; as its distinct objects;
 		// the packs there are; their data in the bucket; all of the bucket.
 		"unpacked_bytes": float64(s.base.Length() + 2*s.patch.Length()), // "base", and "patch" and "alias" on one pack
@@ -174,6 +175,7 @@ type refsPage struct {
 		UpdatedBy                string  `json:"updated_by"`
 		UpdatedAt                string  `json:"updated_at"`
 		Kind                     string  `json:"kind"`
+		Verified                 bool    `json:"verified"`
 		UnpackedBytes            int64   `json:"unpacked_bytes"`
 		RefObjects               int64   `json:"ref_objects"`
 		RefBytes                 int64   `json:"ref_bytes"`
@@ -201,6 +203,9 @@ func TestRefs(t *testing.T) {
 		t.Fatalf("refs in order %s, %s, %s", alias.Name, base.Name, patch.Name)
 	}
 
+	if !base.Verified || !patch.Verified || !alias.Verified {
+		t.Errorf("references of verified packs are marked as not verified: %v, %v, %v", base.Verified, patch.Verified, alias.Verified)
+	}
 	if base.Kind != "base" || base.Root != s.base.String() || base.ParentRoot != nil ||
 		base.RefObjects != 10 || base.RefBytes != 1000 || base.SharedBytes != 0 ||
 		base.ParentUnreachableObjects != 0 || base.ParentUnreachableBytes != 0 {
@@ -262,6 +267,7 @@ type packJSON struct {
 	ID            int64   `json:"id"`
 	Root          string  `json:"root"`
 	Kind          string  `json:"kind"`
+	Verified      bool    `json:"verified"`
 	ParentRoot    *string `json:"parent_root"`
 	UnpackedBytes int64   `json:"unpacked_bytes"`
 	Objects       int64   `json:"objects"`
@@ -291,7 +297,7 @@ func TestPacks(t *testing.T) {
 	}
 	base, patch := page.Packs[0], page.Packs[1]
 	want := packJSON{
-		ID: base.ID, Root: s.base.String(), Kind: "base", UnpackedBytes: int64(s.base.Length()),
+		ID: base.ID, Root: s.base.String(), Kind: "base", Verified: true, UnpackedBytes: int64(s.base.Length()),
 		Objects: 10, Bytes: 1000, DataSize: 400, IndexSize: 456,
 		LinksSize: 100, Uploader: "alice", UploadedAt: "2027-01-15T08:00:00Z", Refs: 1, Children: 1,
 	}
@@ -312,6 +318,92 @@ func TestPacks(t *testing.T) {
 		t.Fatalf("second page: %+v", page)
 	}
 	s.get(t, "/api/packs?after=x", http.StatusBadRequest, nil)
+}
+
+// What a server without verification recorded is told from the rest: the
+// packs themselves, and the references a pull of which reads such a pack,
+// be it their own or the parent of their own.
+func TestWhatWasNotVerifiedIsMarked(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "store.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	ctx := context.Background()
+	trusted, onIt, sound := rootOf(t, "trusted"), rootOf(t, "on it"), rootOf(t, "sound")
+	commit := func(name string, root key.Key, parent *key.Key, v db.Verified) {
+		t.Helper()
+		u := db.Upload{
+			ID: name, Name: name, Root: root, Uploader: "alice",
+			DataKey: name + ".data", IndexKey: name + ".idx", LinksKey: name + ".links",
+			DataSize: 100, Objects: v.Objects, SharedObjects: v.SharedObjects, SharedBytes: v.SharedBytes,
+			State: db.StatePending, IssuedAt: uploaded, Deadline: later,
+		}
+		if _, err := d.CreateUpload(ctx, u, parent); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.CommitUpload(ctx, name, &v, uploaded, later); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commit("a-trusted", trusted, nil, db.Verified{IndexSize: 456, Objects: 10, Bytes: 1000, Sketch: sketch.Sketch{trusted}, OnTrust: true})
+	commit("b-on-it", onIt, &trusted, db.Verified{IndexSize: 148, Objects: 3, Bytes: 300, SharedObjects: 6, SharedBytes: 700})
+	commit("c-sound", sound, nil, db.Verified{IndexSize: 456, LinksSize: 100, Objects: 10, Bytes: 1000, Sketch: sketch.Sketch{sound}})
+	srv := httptest.NewServer(admin.Handler(d))
+	t.Cleanup(srv.Close)
+	s := &store{db: d, srv: srv}
+
+	var stats map[string]float64
+	s.get(t, "/api/stats", http.StatusOK, &stats)
+	if stats["unverified_packs"] != 1 || stats["base_packs"] != 2 || stats["patch_packs"] != 1 {
+		t.Errorf("stats: %v", stats)
+	}
+
+	var packs packsPage
+	s.get(t, "/api/packs", http.StatusOK, &packs)
+	if len(packs.Packs) != 3 {
+		t.Fatalf("got %d packs", len(packs.Packs))
+	}
+	if p := packs.Packs[0]; p.Root != trusted.String() || p.Verified || p.LinksSize != 0 {
+		t.Errorf("the pack on trust: %+v", p)
+	}
+	if p := packs.Packs[1]; p.Root != onIt.String() || !p.Verified || p.SharedBytes != 700 {
+		t.Errorf("the verified patch pack on it: %+v", p)
+	}
+	if p := packs.Packs[2]; p.Root != sound.String() || !p.Verified {
+		t.Errorf("the verified base pack: %+v", p)
+	}
+
+	var refs refsPage
+	s.get(t, "/api/refs", http.StatusOK, &refs)
+	if len(refs.Refs) != 3 {
+		t.Fatalf("got %d refs", len(refs.Refs))
+	}
+	for i, want := range []bool{false, false, true} {
+		if r := refs.Refs[i]; r.Verified != want {
+			t.Errorf("reference %s: verified %v, want %v", r.Name, r.Verified, want)
+		}
+	}
+
+	var det detail
+	s.get(t, "/api/packs/"+onIt.String(), http.StatusOK, &det)
+	if !det.Pack.Verified || det.Parent == nil || det.Parent.Verified {
+		t.Errorf("detail of the patch pack: %+v on %+v", det.Pack, det.Parent)
+	}
+
+	var top struct {
+		ByRefs     []packJSON `json:"by_refs"`
+		ByChildren []packJSON `json:"by_children"`
+	}
+	s.get(t, "/api/top", http.StatusOK, &top)
+	if len(top.ByChildren) != 1 || top.ByChildren[0].Root != trusted.String() || top.ByChildren[0].Verified {
+		t.Errorf("the packs leaned on: %+v", top.ByChildren)
+	}
+	for _, p := range top.ByRefs {
+		if p.Verified != (p.Root != trusted.String()) {
+			t.Errorf("pack %s among those pointed at: verified %v", p.Root, p.Verified)
+		}
+	}
 }
 
 type detail struct {

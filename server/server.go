@@ -8,6 +8,11 @@
 // and only then lets a reference point at it. A pull is answered with
 // pre-signed URLs.
 //
+// The verification can be turned off (Config.NoVerify). The server then
+// lets a reference point at a pack as soon as it has seen that the pack's
+// objects are in the bucket, and whether the pack is sound is found out by
+// whoever pulls it.
+//
 // Nothing is deleted from the bucket directly. Whatever decides that an
 // object has to go writes it to a queue in the same database transaction,
 // and Sweep carries the queue out, so a crash at any point leaves nothing
@@ -85,13 +90,23 @@ type Config struct {
 	// PartSize is the size above which data is uploaded in parts, and the
 	// size of a part. Zero means 64 MiB.
 	PartSize int64
-	// VerifyJobs is how many packs are verified at once. Zero means 2.
+	// VerifyJobs is how many packs are verified at once. Zero means 2. With
+	// NoVerify it is how many commits are looked at at once, each of which
+	// holds the index of its pack in memory.
 	VerifyJobs int
 	// MaxPackBytes is the largest uncompressed size a pack may have. A
 	// verification writes that much to Scratch, and a few megabytes of zstd
 	// can announce terabytes, so this is what bounds the scratch space:
 	// VerifyJobs times MaxPackBytes. Zero means 16 GiB.
 	MaxPackBytes int64
+	// NoVerify records packs without verifying them. The server sees that
+	// the index and the data of an upload are in the bucket, at the sizes
+	// announced, and reads the index; the data it does not read. A pack
+	// that is incomplete, or whose objects are not what their keys say, is
+	// then recorded like any other, and is found out by the client that
+	// pulls it. Such packs are marked as not verified, and what a patch
+	// pack among them shares with its parent is the figure of its client.
+	NoVerify bool
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
 	// Log receives what the server has to say. Nil means slog.Default().
@@ -107,6 +122,7 @@ type Server struct {
 	urlTTL        time.Duration
 	partSize      int64
 	maxPackBytes  uint64
+	noVerify      bool
 	verifying     chan struct{}
 	now           func() time.Time
 	log           *slog.Logger
@@ -125,6 +141,7 @@ func New(cfg Config) (*Server, error) {
 		uploadTimeout: cfg.UploadTimeout,
 		urlTTL:        cfg.URLTTL,
 		partSize:      cfg.PartSize,
+		noVerify:      cfg.NoVerify,
 		now:           cfg.Now,
 		log:           cfg.Log,
 	}

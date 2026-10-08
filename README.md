@@ -62,6 +62,7 @@ answers mDNS on the local network.
 | `--url-ttl D` | `JACCARD_URL_TTL` | `1h` |
 | `--part-size N` | `JACCARD_PART_SIZE` | `64MiB` |
 | `--verify-jobs N` | `JACCARD_VERIFY_JOBS` | `2` |
+| `--no-verify` | `JACCARD_NO_VERIFY` | off: every pack is verified |
 | `--max-pack-size N` | `JACCARD_MAX_PACK_SIZE` | `16GiB` |
 | `--bind IP:PORT` | `JACCARD_BIND` | every address, a port the system picks |
 
@@ -74,6 +75,36 @@ URLs, between one second and seven days. The server needs scratch space for
 `--max-pack-size` times `--verify-jobs`: a pack is decompressed there to be
 verified, and the limit is what keeps a few megabytes of upload from
 announcing terabytes.
+
+### Without verification
+
+Before a reference may point at a pack, the server downloads the pack from
+the bucket, decompresses it and walks it from the root: every object has
+to be what its key says, and none may be missing. That costs a download
+and scratch space for every push. `--no-verify` turns it off:
+
+```sh
+jaccard-stored --data /var/lib/jaccard --s3-bucket my-packs --no-verify
+```
+
+The server then checks that the index and the data are in the bucket, at
+the sizes the client announced, and reads the index, which has to parse
+and to hold the root. It reads nothing of the data. What that means:
+
+- **A pack that is incomplete or corrupt is stored**, and a reference
+  points at it. The client checks every object and the whole tree when it
+  pulls, so the damage is found by whoever pulls, not by whoever pushed. A
+  base pack that is damaged is damaged for every patch pack on it.
+- Such packs are **marked as not verified**: the client says so when it
+  pushes, and the admin page marks the packs and the references and counts
+  them.
+- What a patch pack shares with its parent, which the statistics need, is
+  the count of the client that pushed it. A verifying server measures it.
+
+Access is open, so use it for a server whose clients you trust. The
+setting can change from one run to the next: a store may hold packs of
+both kinds, and a pack keeps the mark it was recorded with. Nothing
+verifies a pack afterwards but a pull.
 
 ### Admin page
 
@@ -102,7 +133,9 @@ pack with who uploaded it and when, and the open uploads.
 
 The sizes are the server's own, computed from the packs it verified, but
 for one: unpacked is the size a reference's root key records for its tree,
-and the server takes the key's word for it. Objects queued for deletion
+and the server takes the key's word for it. Packs recorded
+[without verification](#without-verification) are marked and counted, and
+what a patch pack of those has from its parent is its client's count. Objects queued for deletion
 and open uploads are in the bucket too and are not counted.
 
 The page is read-only and has no authentication, which is why it listens
@@ -281,7 +314,10 @@ a bar, the percentage, the amounts, the rate and the time left:
 The rate is that of the last ten seconds, and the time left follows from
 it. A narrow terminal loses the amounts first, then the rate, then the
 bar. The server's verification of an upload has no bar: the server says
-nothing until it is through, so only the time it has taken is known.
+nothing until it is through, so only the time it has taken is known. A
+server that [does not verify](#without-verification) answers at once, and
+the step and the line the command prints for the push say that the pack
+was not verified.
 
 Where standard error is not a terminal, every step is a plain line when it
 ends, and a step that runs long reports every five seconds:
@@ -330,6 +366,8 @@ already has the parent's content never downloads it again.
 - **The database is the only record** of the references and of which pack
   leans on which. Back it up; the bucket alone does not describe the store.
 - A verification needs scratch space for the uncompressed pack.
+- A pack recorded [without verification](#without-verification) is never
+  verified later, except by the client that pulls it.
 - A pull that needs the parent downloads all of it.
 - One server per bucket prefix.
 

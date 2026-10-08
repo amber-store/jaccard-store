@@ -49,6 +49,10 @@ type PushResult struct {
 	Objects  uint64
 	Bytes    uint64
 	DataSize uint64
+	// Unverified: the server recorded the uploaded pack without verifying
+	// it. It saw that the pack was uploaded and read no more of it than
+	// its index, so whether the pack is sound is found out by a pull.
+	Unverified bool
 }
 
 // Push makes name on the server point at root, whose objects are all in
@@ -231,6 +235,10 @@ func (c *Client) push(ctx context.Context, objects *packstore.Store, name string
 	if parent != nil {
 		res.Parent = &parent.root
 		upload.Parent = parent.root[:]
+		// What the reference has of the parent. A server that verifies
+		// measures this itself; one that does not has only this to go by.
+		upload.SharedObjects = uint64(parent.objects)
+		upload.SharedBytes = parent.shared
 	}
 	// The step begins with asking for the URLs: the server takes a moment
 	// to lay out a large upload.
@@ -263,12 +271,18 @@ func (c *Client) push(ctx context.Context, objects *packstore.Store, name string
 	p.End(how)
 
 	// The server fetches the pack from the bucket and walks its objects,
-	// and says nothing until it is through.
+	// and says nothing until it is through. One that does not verify
+	// answers as soon as it has seen the pack in the bucket, and says so.
 	p.Begin("verifying on the server", 0, NoUnit)
-	if _, err := c.call(ctx, wire.Request{Op: wire.OpPushCommit, UploadID: urls.UploadID}); err != nil {
+	committed, err := c.call(ctx, wire.Request{Op: wire.OpPushCommit, UploadID: urls.UploadID})
+	if err != nil {
 		return PushResult{}, err
 	}
-	p.End("accepted")
+	if res.Unverified = committed.Unverified; res.Unverified {
+		p.End("accepted as it is: this server does not verify")
+	} else {
+		p.End("accepted")
+	}
 	return res, nil
 }
 

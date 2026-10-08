@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/amber-store/core/key"
 )
 
 func mustCreate(t *testing.T, d *DB, u Upload) Upload {
@@ -78,6 +80,109 @@ func TestCreateUpload(t *testing.T) {
 	}
 }
 
+// What an upload says it shares with its parent is the client's word, and
+// is recorded only if it can be true.
+func TestCreateUploadHoldsWhatIsSharedToTheParent(t *testing.T) {
+	d := open(t)
+	roots := testKeys(t, "root", 2)
+	base := addBase(t, d, "base", roots[0], sketchOf(roots[0]))
+	if base.Objects == 0 || base.Bytes == 0 {
+		t.Fatalf("the base pack of this test holds nothing: %+v", base)
+	}
+	cases := map[string]struct {
+		parent         *key.Key
+		objects, bytes int64
+		ok             bool
+	}{
+		"nothing":                {&roots[0], 0, 0, true},
+		"a part of the parent":   {&roots[0], 1, 1, true},
+		"all the parent holds":   {&roots[0], base.Objects, base.Bytes, true},
+		"nothing, and no parent": {nil, 0, 0, true},
+		"more objects":           {&roots[0], base.Objects + 1, 1, false},
+		"more bytes":             {&roots[0], 1, base.Bytes + 1, false},
+		"objects below nothing":  {&roots[0], -1, 0, false},
+		"bytes below nothing":    {&roots[0], 0, -1, false},
+		"objects of no parent":   {nil, 1, 0, false},
+		"bytes of no parent":     {nil, 0, 1, false},
+	}
+	for name, c := range cases {
+		id := nextUploadID()
+		in := upload(id, "x", roots[1])
+		in.SharedObjects, in.SharedBytes = c.objects, c.bytes
+		got, err := d.CreateUpload(ctx, in, c.parent)
+		if !c.ok {
+			if !errors.Is(err, ErrShared) {
+				t.Errorf("%s: got error %v, want ErrShared", name, err)
+			}
+			wantNoUpload(t, d, id)
+			continue
+		}
+		if err != nil || got.SharedObjects != c.objects || got.SharedBytes != c.bytes {
+			t.Errorf("%s: created %+v, %v", name, got, err)
+			continue
+		}
+		if read, err := d.UploadByID(ctx, id); err != nil || read != got {
+			t.Errorf("%s: read back %+v, %v; want %+v", name, read, err, got)
+		}
+	}
+}
+
+// A pack on trust is recorded as one that was not verified. A base pack of
+// the kind has no links, is found by its sketch like any other and can be
+// leaned on; when it goes, there are no links of it to delete. A patch pack
+// on trust queues nothing: links are never written for one.
+func TestCommitUploadOnTrust(t *testing.T) {
+	d := open(t)
+	roots := testKeys(t, "root", 2)
+	sk := sketchOf(roots[0])
+	mustCreate(t, d, upload("base", "x", roots[0]))
+	base, err := d.CommitUpload(ctx, "base", &Verified{IndexSize: 456, Objects: 10, Bytes: 1000, Sketch: sk, OnTrust: true}, t0, later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.Verified || base.LinksKey != "" || base.LinksSize != 0 || !base.IsBase() {
+		t.Fatalf("a base pack on trust recorded as %+v", base)
+	}
+	if got := wantPack(t, d, roots[0]); got != base {
+		t.Fatalf("read back %+v, want %+v", got, base)
+	}
+	// Links an earlier attempt may have written for the upload go.
+	wantQueued(t, d, t0, "base.links")
+	near, err := d.Nearest(ctx, sk, 3)
+	if err != nil || len(near) != 1 || near[0].Pack != base {
+		t.Fatalf("its sketch finds %+v, %v", near, err)
+	}
+
+	in := upload("patch", "y", roots[1])
+	in.SharedObjects, in.SharedBytes = 3, 300
+	u, err := d.CreateUpload(ctx, in, &roots[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, err := d.CommitUpload(ctx, "patch", &Verified{
+		IndexSize: 104, Objects: 2, Bytes: 50, SharedObjects: u.SharedObjects, SharedBytes: u.SharedBytes, OnTrust: true,
+	}, t0, later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if patch.Verified || patch.ParentID != base.ID || patch.SharedObjects != 3 || patch.SharedBytes != 300 {
+		t.Fatalf("a patch pack on trust recorded as %+v", patch)
+	}
+	// A verified pack beside them is not counted with them.
+	addBase(t, d, "sound", testKeys(t, "sound", 1)[0], sketchOf(roots[1]))
+	if s, err := d.Stats(ctx); err != nil || s.UnverifiedPacks != 2 || s.BasePacks != 2 || s.PatchPacks != 1 {
+		t.Fatalf("Stats = %+v, %v", s, err)
+	}
+
+	for _, name := range []string{"x", "y"} {
+		if err := d.DeleteRef(ctx, name, later); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantNoPack(t, d, roots[0])
+	wantQueued(t, d, later, "base.links", "patch.data", "patch.idx", "base.data", "base.idx")
+}
+
 func TestBeginVerify(t *testing.T) {
 	d := open(t)
 	root := testKeys(t, "root", 1)[0]
@@ -131,6 +236,7 @@ func TestCommitUploadRecordsThePack(t *testing.T) {
 		DataSize: in.DataSize, IndexSize: v.IndexSize, LinksSize: v.LinksSize,
 		Objects: v.Objects, Bytes: v.Bytes,
 		Uploader: "alice", UploadedAt: t1,
+		Verified: true,
 	}
 	if p != want || wantPack(t, d, roots[0]) != want {
 		t.Fatalf("pack = %+v, want %+v", p, want)
