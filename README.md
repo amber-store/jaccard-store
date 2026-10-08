@@ -13,7 +13,16 @@ Every reference gets at most one pack, named by its root key:
 A push sends the server a sketch of the reference's key set (its 256 lowest
 keys). The server answers with the three base packs whose sketches are
 nearest by estimated Jaccard distance, and the client uploads a patch pack
-against the best of them, or a base pack if none is near enough.
+against the best of them, or a base pack if none is fit to be its parent.
+
+A base pack is fit to be the parent when it holds at least `--min-dedup` of
+the reference's bytes (half, by default), and when a pull of the reference
+would not have to fetch more than twice the reference for it: a pull of a
+patch pack fetches the parent whole, and a small reference is not hung on a
+large pack that is mostly something else. Of the packs that are fit, the
+one holding the most of the reference is taken; of those holding the same,
+the nearest; of those as near, the smallest. Sizes are those of the
+objects, before compression.
 
 The server never carries pack bytes. Clients move them between themselves
 and the bucket through pre-signed URLs; the server downloads an upload,
@@ -190,9 +199,9 @@ a bar, the percentage, the amounts, the rate and the time left:
 
 ```
 ✓ connecting to the server     1.1s
-✓ reading the tree             0.0s  2,604 objects
+✓ reading the tree             0.0s  2,604 objects, 190.94 MiB
 ✓ finding nearby packs         0.1s  1 on the server
-✓ comparing nearby packs       0.2s  it holds 152.78 MiB of the reference
+✓ comparing nearby packs       0.2s  a parent that holds 152.78 MiB of 190.94 MiB
 ✓ packing                      0.0s  patch pack of 523 objects, 38.16 MiB → 38.17 MiB
 ⠹ uploading                      1s  ███████████░░░░░░░░░░░░░░░░   41.1%  15.70 / 38.19 MiB   12.64 MiB/s  eta 2s
 ```

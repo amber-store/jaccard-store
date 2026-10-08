@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync/atomic"
 
 	"github.com/amber-store/core/fstree"
 	"github.com/amber-store/core/key"
@@ -19,8 +20,10 @@ import (
 // PushOptions tune a push.
 type PushOptions struct {
 	// MinDedup is the threshold for a patch pack: the fraction of the
-	// reference's bytes the best candidate must hold. At 0 any candidate
-	// sharing an object qualifies; above 1 none does.
+	// reference's bytes a base pack must hold to become its parent. At 0
+	// any pack sharing an object qualifies; above 1 none does. A pack
+	// that qualifies is still passed over when it would make a pull fetch
+	// more than twice the reference.
 	MinDedup float64
 	// TempDir is where the pack is built before it is uploaded. Empty means
 	// os.TempDir().
@@ -50,45 +53,137 @@ type PushResult struct {
 
 // Push makes name on the server point at root, whose objects are all in
 // objects. Unless the server has a pack for root already, it uploads one:
-// a patch pack against the nearest base pack if that holds at least
-// opts.MinDedup of the bytes, and a base pack otherwise.
+// a patch pack against one of the base packs the server offers, if one of
+// them is fit to be its parent (see choose), and a base pack otherwise.
 func (c *Client) Push(ctx context.Context, objects *packstore.Store, name string, root key.Key, opts PushOptions) (PushResult, error) {
 	p := progressOf(opts.Progress)
-	// Only the objects with children are read, so the count that runs is
-	// of those; the step ends with the count of all.
-	p.Begin("reading the tree", 0, Objects)
-	keys, err := fstree.ReachableKeys(root, func(k key.Key) ([]byte, error) {
-		p.Advance(1)
-		return objects.Get(k)
-	})
+	keys, size, err := keySet(root, objects, p)
 	if err != nil {
 		return PushResult{}, fmt.Errorf("push: listing the objects of %s: %w", root, err)
 	}
-	keys = keyset.Normalize(keys)
-	p.End(human.Count(uint64(len(keys))) + " objects")
-	res, err := c.push(ctx, objects, name, root, keys, opts)
+	res, err := c.push(ctx, objects, name, root, keys, size, opts)
 	if refused(err, wire.CodeParentGone) {
 		// The base pack chosen was collected between the two requests. The
 		// server's offer is different now. The step the refusal came in
 		// ends here, for the next push begins its own.
 		p.End("the base pack is gone from the server: once more")
-		res, err = c.push(ctx, objects, name, root, keys, opts)
+		res, err = c.push(ctx, objects, name, root, keys, size, opts)
 	}
 	return res, err
+}
+
+// keySet lists the objects reachable from root, in the order every package
+// agrees on, and adds up their bytes. It is the step of reading the tree.
+//
+// The size costs no reading of its own. The walk reads every object that
+// has children, and those are measured as they pass; the others are blobs
+// and sets of extended attributes, whose keys say how long they are.
+func keySet(root key.Key, objects *packstore.Store, p Progress) (keys []key.Key, size uint64, err error) {
+	// Only the objects with children are read, so the count that runs is
+	// of those; the step ends with the count of all.
+	p.Begin("reading the tree", 0, Objects)
+	var read atomic.Uint64
+	keys, err = fstree.ReachableKeys(root, func(k key.Key) ([]byte, error) {
+		p.Advance(1)
+		data, err := objects.Get(k)
+		read.Add(uint64(len(data)))
+		return data, err
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	keys = keyset.Normalize(keys)
+	size = read.Load()
+	for _, k := range keys {
+		if t := k.Type(); t == key.Blob || t == key.XattrSet {
+			size += k.Length()
+		}
+	}
+	p.End(fmt.Sprintf("%s objects, %s", human.Count(uint64(len(keys))), human.Bytes(size)))
+	return keys, size, nil
 }
 
 // maxCandidates is how many base packs a server offers.
 const maxCandidates = 3
 
-// candidate is a base pack the server offered, with what it shares with
-// the key set being pushed.
+// maxPull is how much a pull of the reference may have to fetch for the
+// reference to be pushed as a patch pack, as a multiple of the reference's
+// own size. A pull of a patch pack fetches the parent whole and the patch;
+// a parent that is mostly something else makes every pull pay for what the
+// reference does not hold. Past this, a base pack is pushed instead: more
+// to upload once, less to download every time.
+const maxPull = 2
+
+// candidate is a base pack the server offered, with what it has to do with
+// the key set being pushed. Sizes are of objects as they are, not as a
+// pack compresses them.
 type candidate struct {
-	root   key.Key
-	index  *packfile.Index
-	shared uint64 // bytes of the key set's objects the pack holds
+	root     key.Key
+	index    *packfile.Index
+	distance float64 // the server's estimate of the Jaccard distance
+	bytes    uint64  // of all the pack's objects: what a pull fetches of it
+	objects  int     // of the key set that the pack holds
+	shared   uint64  // and their bytes
 }
 
-func (c *Client) push(ctx context.Context, objects *packstore.Store, name string, root key.Key, keys []key.Key, opts PushOptions) (PushResult, error) {
+// pull is what a pull of a reference of size bytes fetches when it is
+// pushed as a patch of c: the parent whole, and the objects it lacks.
+func (c *candidate) pull(size uint64) uint64 {
+	return c.bytes + (size - min(size, c.shared))
+}
+
+// dedup is the part of a reference of size bytes that c holds.
+func (c *candidate) dedup(size uint64) float64 {
+	if size == 0 {
+		return 0
+	}
+	return float64(c.shared) / float64(size)
+}
+
+// fit reports whether a reference of size bytes may be a patch of c: c
+// holds an object of it, holds at least minDedup of its bytes, and does
+// not make a pull fetch more than maxPull times the reference.
+func (c *candidate) fit(size uint64, minDedup float64) bool {
+	// What the parent holds besides the reference is what a pull fetches
+	// for nothing, and may be as much as the reference itself for each
+	// time over one that maxPull allows.
+	return c.objects > 0 && c.dedup(size) >= minDedup && c.bytes-c.shared <= (maxPull-1)*size
+}
+
+// choose returns the pack a reference of size bytes is made a patch of, or
+// nil when none of the candidates is fit for it and the reference is to be
+// a base pack.
+//
+// Of the candidates that are fit, the one that holds the most of the
+// reference's bytes is taken: it leaves the least to upload and to store.
+// Among those that hold the same, the nearest by the server's estimate of
+// the Jaccard distance; among those as near, the smallest, which is the
+// least to fetch.
+func choose(candidates []*candidate, size uint64, minDedup float64) *candidate {
+	var best *candidate
+	for _, c := range candidates {
+		if !c.fit(size, minDedup) {
+			continue
+		}
+		if best == nil || better(c, best) {
+			best = c
+		}
+	}
+	return best
+}
+
+// better reports whether a is to be preferred to b as a parent.
+func better(a, b *candidate) bool {
+	switch {
+	case a.shared != b.shared:
+		return a.shared > b.shared
+	case a.distance != b.distance:
+		return a.distance < b.distance
+	}
+	return a.bytes < b.bytes
+}
+
+func (c *Client) push(ctx context.Context, objects *packstore.Store, name string, root key.Key, keys []key.Key, size uint64, opts PushOptions) (PushResult, error) {
 	p := progressOf(opts.Progress)
 	start := wire.Request{Op: wire.OpPushStart, Name: name, Root: root[:]}
 	for _, k := range sketch.Of(keys) {
@@ -104,7 +199,7 @@ func (c *Client) push(ctx context.Context, objects *packstore.Store, name string
 		return PushResult{Root: root, Stored: true}, nil
 	}
 	p.End(fmt.Sprintf("%d on the server", min(len(offer.Candidates), maxCandidates)))
-	best, err := c.best(ctx, keys, offer.Candidates, p)
+	parent, err := c.parent(ctx, keys, size, offer.Candidates, opts.MinDedup, p)
 	if err != nil {
 		return PushResult{}, err
 	}
@@ -117,7 +212,7 @@ func (c *Client) push(ctx context.Context, objects *packstore.Store, name string
 		f.Close()
 		os.Remove(f.Name())
 	}()
-	index, patch, err := build(ctx, f, objects, keys, best, opts.MinDedup, p)
+	index, err := build(ctx, f, objects, keys, parent, p)
 	if err != nil {
 		return PushResult{}, fmt.Errorf("push: building the pack: %w", err)
 	}
@@ -127,15 +222,15 @@ func (c *Client) push(ctx context.Context, objects *packstore.Store, name string
 	}
 	res := PushResult{Root: root, Objects: uint64(index.Len()), Bytes: index.DataSize(), DataSize: uint64(info.Size())}
 	kind := "base pack"
-	if patch {
+	if parent != nil {
 		kind = "patch pack"
 	}
 	p.End(fmt.Sprintf("%s of %s objects, %s → %s", kind, human.Count(res.Objects), human.Bytes(res.Bytes), human.Bytes(res.DataSize)))
 
 	upload := wire.Request{Op: wire.OpPushUpload, Name: name, Root: root[:], DataSize: res.DataSize, Objects: res.Objects, Bytes: res.Bytes}
-	if patch {
-		res.Parent = &best.root
-		upload.Parent = best.root[:]
+	if parent != nil {
+		res.Parent = &parent.root
+		upload.Parent = parent.root[:]
 	}
 	// The step begins with asking for the URLs: the server takes a moment
 	// to lay out a large upload.
@@ -177,11 +272,13 @@ func (c *Client) push(ctx context.Context, objects *packstore.Store, name string
 	return res, nil
 }
 
-// best fetches the indexes of the offered packs and returns the one that
-// holds the most bytes of keys, or nil when none holds any. A candidate
-// whose index cannot be had is passed over: it may have been collected
-// since the offer, and a base pack is always a correct answer.
-func (c *Client) best(ctx context.Context, keys []key.Key, offered []wire.Candidate, p Progress) (*candidate, error) {
+// parent fetches the indexes of the offered packs, compares them with the
+// key set and returns the one the pack is to be a patch of, or nil for a
+// base pack: see choose. size is the bytes of the key set's objects.
+//
+// A candidate whose index cannot be had is passed over: it may have been
+// collected since the offer, and a base pack is always a correct answer.
+func (c *Client) parent(ctx context.Context, keys []key.Key, size uint64, offered []wire.Candidate, minDedup float64, p Progress) (*candidate, error) {
 	// The server offers three packs at most; no more than that are fetched,
 	// whatever it sends.
 	offered = offered[:min(len(offered), maxCandidates)]
@@ -195,7 +292,7 @@ func (c *Client) best(ctx context.Context, keys []key.Key, offered []wire.Candid
 		}
 	}
 	p.Begin("comparing nearby packs", indexes, Bytes)
-	var best *candidate
+	var candidates []*candidate
 	for _, o := range offered {
 		root, err := key.Parse(o.Root)
 		if err != nil || o.Objects > packfile.MaxEntries {
@@ -212,92 +309,89 @@ func (c *Client) best(ctx context.Context, keys []key.Key, offered []wire.Candid
 		if err != nil {
 			continue
 		}
-		cand := &candidate{root: root, index: index}
+		cand := &candidate{root: root, index: index, distance: o.Distance, bytes: index.DataSize()}
+		// A distance that is no number orders nothing: such a pack is
+		// taken for the farthest there is.
+		if !(cand.distance >= 0) {
+			cand.distance = 1
+		}
 		for _, k := range keys {
 			if i, ok := index.Find(k); ok {
+				cand.objects++
 				cand.shared += uint64(index.Entry(i).Length)
 			}
 		}
-		// The offer comes nearest first, so a tie stays with the nearer.
-		if best == nil || cand.shared > best.shared {
-			best = cand
-		}
+		candidates = append(candidates, cand)
 	}
-	if best == nil || best.shared == 0 {
-		p.End("nothing in common")
-	} else {
-		which := "it"
-		if len(offered) > 1 {
-			which = fmt.Sprintf("the best of %d", len(offered))
-		}
-		p.End(fmt.Sprintf("%s holds %s of the reference", which, human.Bytes(best.shared)))
-	}
-	return best, nil
+	chosen := choose(candidates, size, minDedup)
+	p.End(verdict(candidates, chosen, size, minDedup))
+	return chosen, nil
 }
 
-// build writes the pack of keys to f and reports whether it is a patch
-// pack of best. The objects best lacks go in first; if best then holds at
-// least minDedup of the bytes, that is the pack. Otherwise the objects best
-// holds are appended to the same stream and the pack is a base pack.
+// verdict says in a few words what came of comparing the candidates: which
+// was chosen, or why none was.
+func verdict(candidates []*candidate, chosen *candidate, size uint64, minDedup float64) string {
+	if chosen != nil {
+		return fmt.Sprintf("a parent that holds %s of %s", human.Bytes(chosen.shared), human.Bytes(size))
+	}
+	// The one that would have been taken, had it been fit.
+	var best *candidate
+	for _, c := range candidates {
+		if c.objects > 0 && (best == nil || better(c, best)) {
+			best = c
+		}
+	}
+	switch {
+	case best == nil:
+		return "nothing in common"
+	case best.dedup(size) < minDedup:
+		return fmt.Sprintf("too little in common: %s of %s", human.Bytes(best.shared), human.Bytes(size))
+	}
+	// Enough in common, and no parent all the same: the ones that hold
+	// enough are too large.
+	for _, c := range candidates {
+		if c.objects > 0 && c.dedup(size) >= minDedup && c.pull(size) < best.pull(size) {
+			best = c
+		}
+	}
+	return fmt.Sprintf("too large a parent: a pull would fetch %s for %s", human.Bytes(best.pull(size)), human.Bytes(size))
+}
+
+// build writes to f the pack of the objects of keys that parent lacks: all
+// of them when parent is nil, which makes a base pack.
 //
 // build begins the step of packing and leaves it running: its caller ends
 // it, with the size the pack came to.
-func build(ctx context.Context, f *os.File, objects *packstore.Store, keys []key.Key, best *candidate, minDedup float64, p Progress) (*packfile.Index, bool, error) {
-	var own, shared []key.Key
+func build(ctx context.Context, f *os.File, objects *packstore.Store, keys []key.Key, parent *candidate, p Progress) (*packfile.Index, error) {
+	// A list of its own: it is put into the store's order below, and keys
+	// is the caller's.
+	var own []key.Key
 	for _, k := range keys {
-		if best != nil && best.index.Has(k) {
-			shared = append(shared, k)
-		} else {
+		if parent == nil || !parent.index.Has(k) {
 			own = append(own, k)
 		}
 	}
 	w, err := packfile.NewWriter(f)
 	if err != nil {
-		return nil, false, err
-	}
-	add := func(keys []key.Key) error {
-		// The pack's order is free, so the packstore is read in its own.
-		objects.SortByLocation(keys)
-		for _, k := range keys {
-			// Reading and compressing a large reference takes minutes,
-			// and nothing else on the way looks at the context.
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			data, err := objects.Get(k)
-			if err != nil {
-				return fmt.Errorf("object %s: %w", k, err)
-			}
-			if err := w.Add(k, data); err != nil {
-				return err
-			}
-			p.Advance(1)
-		}
-		return nil
+		return nil, err
 	}
 	p.Begin("packing", uint64(len(own)), Objects)
-	if err := add(own); err != nil {
-		return nil, false, err
-	}
-	patch := false
-	if len(shared) > 0 {
-		total := best.shared + w.Bytes()
-		dedup := 0.0
-		if total > 0 {
-			dedup = float64(best.shared) / float64(total)
+	// The pack's order is free, so the packstore is read in its own.
+	objects.SortByLocation(own)
+	for _, k := range own {
+		// Reading and compressing a large reference takes minutes, and
+		// nothing else on the way looks at the context.
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		patch = dedup >= minDedup
-	}
-	if !patch && len(shared) > 0 {
-		p.End(human.Count(uint64(len(own))) + " objects; too little in common for a patch pack")
-		p.Begin("packing shared objects", uint64(len(shared)), Objects)
-		if err := add(shared); err != nil {
-			return nil, false, err
+		data, err := objects.Get(k)
+		if err != nil {
+			return nil, fmt.Errorf("object %s: %w", k, err)
 		}
+		if err := w.Add(k, data); err != nil {
+			return nil, err
+		}
+		p.Advance(1)
 	}
-	index, err := w.Finish()
-	if err != nil {
-		return nil, false, err
-	}
-	return index, patch, nil
+	return w.Finish()
 }

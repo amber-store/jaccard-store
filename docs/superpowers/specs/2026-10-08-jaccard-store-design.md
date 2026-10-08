@@ -56,9 +56,8 @@ and the admin page shows what the store holds and who put it there.
 - The index starts with an 8-byte magic and version before the key count.
 - The sketch travels once, in `push-start`. For a base pack the server takes
   the sketch from the verified index, not from the client.
-- The client decides between a base and a patch pack (`--min-dedup`, default
-  0.5 of the reference's bytes held by the best candidate). The server
-  enforces structure only.
+- The client decides between a base and a patch pack, and on the parent of
+  a patch pack (section 9.1). The server enforces structure only.
 - Every object the walk reads is hashed against its key, blobs included, and
   a pack may hold nothing the walk does not reach.
 - To compute what a reference reaches in its parent without reading the
@@ -491,22 +490,50 @@ time, sizes, parent, children, refs), and the open uploads.
 ### 9.1 Push
 
 1. Read the local ref, list its key set (`fstree.ReachableKeys`), sort it,
-   take the sketch.
+   take the sketch, and add up the bytes of its objects. The sum costs no
+   reading of its own: the walk reads every object that has children, and
+   the others are blobs and sets of extended attributes, whose keys carry
+   their length.
 2. `push-start`. `stored` ends the push.
 3. Fetch the candidates' indexes over HTTP. For each, the shared keys and
-   their bytes are read off the index. The best candidate is the one sharing
-   the most bytes.
-4. Write the objects the best candidate lacks into a temporary data file
-   through one zstd encoder, counting their bytes. If the candidate holds at
-   least `--min-dedup` of the ref's bytes, that is the patch pack.
-   Otherwise the shared objects are appended to the same stream and the
-   pack is a base pack. With no candidate the pack is a base pack.
+   their bytes are read off the index, and so is the size of the whole
+   pack. Choose the parent, as below.
+4. Write the objects the parent lacks into a temporary data file through
+   one zstd encoder: that is the patch pack. Without a parent every object
+   is written and the pack is a base pack.
 5. `push-upload`, then PUT the index and the data (parts in parallel, each
    a section of the file; the ETags go into the completion POST, whose
    answer is checked for an error body).
 6. `push-commit`.
 
 On `parent_gone` the push starts over once.
+
+**The choice of the parent.** All sizes are of objects as they are, not as
+a pack compresses them: what is compared is known before anything is
+packed. With `ref` the bytes of the reference's objects, `shared` those of
+them a candidate holds and `pack` those of all the candidate's objects, a
+candidate is fit to be the parent when
+
+- it holds at least one object of the reference,
+- `shared / ref >= --min-dedup` (default 0.5), and
+- `pack + (ref - shared) <= 2 * ref`: a pull of the reference fetches the
+  parent whole and the patch, and that may be twice the reference and no
+  more. Put otherwise, what the parent holds besides the reference may not
+  be more than the reference itself.
+
+The last rule is why a small reference is not hung on a large pack: every
+pull would fetch the large pack for it. A base pack costs more to upload
+and to store, once; the pull is paid every time.
+
+Of the candidates that are fit, the parent is
+
+1. the one that holds the most bytes of the reference;
+2. among those that hold the same, the nearest by the server's estimate of
+   the Jaccard distance;
+3. among those as near, the smallest;
+4. among those as small, the first the server offered.
+
+When none is fit the pack is a base pack.
 
 ### 9.2 Pull
 
@@ -570,10 +597,10 @@ the server; the steps are the client's own.
 
 | | step | counted in |
 | --- | --- | --- |
-| push | reading the tree | objects read, total unknown |
+| push | reading the tree, which ends with the size of the reference | objects read, total unknown |
 | | finding nearby packs (`push-start`) | nothing |
-| | comparing nearby packs (the candidates' indexes) | bytes |
-| | packing, and packing shared objects when a base pack is built after all | objects |
+| | comparing nearby packs (the candidates' indexes), which ends with the parent chosen or why there is none | bytes |
+| | packing | objects |
 | | uploading (`push-upload`, index and data) | bytes |
 | | verifying on the server (`push-commit`) | nothing |
 | pull | looking up the reference (`pull`) | nothing |
@@ -688,6 +715,11 @@ Tests are written before the code they cover.
 
 - `sketch`, `packfile`, `wire`, `db`: unit tests, including the nearest
   search and the liveness rules.
+- `client`: the choice of the parent as a table of candidates: the
+  threshold and the limit on a pull at their edges, the fall to the next
+  candidate when the one holding the most is too large, and each tie. The
+  size the walk adds up is held against the bytes of the objects read one
+  by one.
 - `verify`: one test per way a pack can be malformed: bad magic, unsorted
   or duplicate keys, entries that do not tile, a stream too short or too
   long, an object that does not hash to its key, a missing child, an entry
@@ -702,7 +734,9 @@ Tests are written before the code they cover.
   pack; a patch pack; a root that is already stored; a ref that moves and
   the collection that follows; an upload that expires; a malformed upload
   refused and removed; the multipart path with a small part size; two
-  clients pushing one root at once; a pull that skips the parent.
+  clients pushing one root at once; a pull that skips the parent; a small
+  reference that is not hung on a large pack, and its next version, which
+  leans on the small pack instead.
 - `admin`: the API through `httptest`.
 - The command: its flags and variables against a server that records what
   it is asked, and `push-dir` and `pull-dir` against one that keeps what is

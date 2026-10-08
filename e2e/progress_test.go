@@ -9,6 +9,7 @@ import (
 
 	"github.com/amber-store/core/key"
 	"github.com/amber-store/jaccard-store/client"
+	"github.com/amber-store/jaccard-store/human"
 	"github.com/amber-store/jaccard-store/packfile"
 	"github.com/amber-store/jaccard-store/server"
 )
@@ -143,6 +144,14 @@ func pushAndPullReportTheirSteps(t *testing.T, s3 backend) {
 	if got := by["packing"].summary; second.Parent == nil || !strings.HasPrefix(got, "patch pack of ") {
 		t.Errorf("packing ended with %q for %+v", got, second)
 	}
+	if got := by["comparing nearby packs"].summary; !strings.HasPrefix(got, "a parent that holds ") {
+		t.Errorf("the comparison ended with %q", got)
+	}
+	// The size the tree is read to have is that of its objects: a base
+	// pack holds them all.
+	if got, want := by["reading the tree"].summary, fmt.Sprintf("%s objects, ", human.Count(uint64(len(alice.keys(alice.ingest(version2())))))); !strings.HasPrefix(got, want) {
+		t.Errorf("reading the tree ended with %q, want it to begin with %q", got, want)
+	}
 
 	// A root the server holds is done once it is known to.
 	if again, seen := push("v2/again", version2()); !again.Stored {
@@ -155,18 +164,19 @@ func pushAndPullReportTheirSteps(t *testing.T, s3 backend) {
 	}
 
 	// Little in common with what is there: the pack becomes a base pack,
-	// and what the nearest pack holds of it is packed as well. It is large
+	// with what the nearest pack holds of it packed as well. It is large
 	// enough to go up in parts, some of them side by side.
 	large := version1()
 	large["blob.bin"] = noise(7, int(partSize*5/2))
 	third, seen := push("large", large)
-	by = seen.names("reading the tree", "finding nearby packs", "comparing nearby packs", "packing", "packing shared objects", "uploading", "verifying on the server")
+	by = seen.names("reading the tree", "finding nearby packs", "comparing nearby packs", "packing", "uploading", "verifying on the server")
 	if third.Parent != nil || third.DataSize <= uint64(2*partSize) {
 		t.Fatalf("third push: %+v, want a base pack of more than two parts", third)
 	}
-	if packed := by["packing"].done + by["packing shared objects"].done; packed != int64(third.Objects) {
-		t.Errorf("%d objects reported packed of %d", packed, third.Objects)
+	if got := by["comparing nearby packs"].summary; !strings.HasPrefix(got, "too little in common: ") {
+		t.Errorf("the comparison ended with %q", got)
 	}
+	whole(t, by["packing"], client.Objects, third.Objects)
 	whole(t, by["uploading"], client.Bytes, uploaded(third))
 	parts := (third.DataSize + uint64(partSize) - 1) / uint64(partSize)
 	if got, want := by["uploading"].summary, fmt.Sprintf(" in %d parts", parts); !strings.HasSuffix(got, want) {

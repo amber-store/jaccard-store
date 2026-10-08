@@ -657,6 +657,72 @@ func aRefWhoseRootSitsInABasePack(t *testing.T, s3 backend) {
 	sameTree(t, docs, alice, bob)
 }
 
+func TestAParentTooLargeForTheReferenceIsNotUsed(t *testing.T) {
+	onEveryBucket(t, aParentTooLargeForTheReferenceIsNotUsed)
+}
+
+// A patch pack costs every pull its parent, whole. A reference that is a
+// small part of what a base pack holds is pushed as a base pack of its own:
+// nobody fetches the large pack to get at the small reference.
+func aParentTooLargeForTheReferenceIsNotUsed(t *testing.T, s3 backend) {
+	w := newWorld(t, s3, nil)
+	alice, bob := w.peer("alice"), w.peer("bob")
+	whole := alice.ingest(version1())
+	alice.push("whole", whole)
+	large := w.pack(whole)
+
+	// The source directory is all in the base pack, and a fiftieth of it.
+	src, err := fstree.ResolvePath(whole, "src", alice.objects.Get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := &steps{t: t}
+	res, err := alice.client.Push(w.ctx, alice.objects, "src", src,
+		client.PushOptions{MinDedup: 0.5, TempDir: t.TempDir(), Progress: seen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Stored || res.Parent != nil || res.Objects != uint64(len(alice.keys(src))) {
+		t.Fatalf("push of a small subtree: %+v, want a base pack of its %d objects", res, len(alice.keys(src)))
+	}
+	if 2*res.Bytes >= uint64(large.Bytes) {
+		t.Fatalf("the subtree is %d bytes of the pack's %d: not small enough for this test", res.Bytes, large.Bytes)
+	}
+	if p := w.pack(src); !p.IsBase() {
+		t.Fatalf("the server recorded %+v", p)
+	}
+	by := seen.names("reading the tree", "finding nearby packs", "comparing nearby packs", "packing", "uploading", "verifying on the server")
+	if got := by["comparing nearby packs"].summary; !strings.HasPrefix(got, "too large a parent: a pull would fetch ") {
+		t.Errorf("the comparison ended with %q", got)
+	}
+	// What it was for: the pull fetches the small pack and no other.
+	if got := bob.pull("src"); got.Root != src || got.Packs != 1 {
+		t.Fatalf("pull: %+v, want one pack", got)
+	}
+	sameTree(t, src, alice, bob)
+
+	// A version of the small directory now has two packs that hold as
+	// much of it, the large one and the small one. It leans on the small:
+	// the large is out of the question, and were it not, the nearer and
+	// the smaller of two that hold the same is taken.
+	next := alice.ingest(map[string][]byte{"main.go": text("main", 40), "util.go": text("util", 40), "new.go": text("new", 10)})
+	res = alice.push("src/next", next)
+	if res.Parent == nil || *res.Parent != src {
+		t.Fatalf("push of a version of the subtree: %+v, want a patch pack of %s", res, src)
+	}
+	carol := w.peer("carol")
+	if got := carol.pull("src/next"); got.Packs != 2 {
+		t.Fatalf("pull: %+v, want the patch pack and its parent", got)
+	}
+	sameTree(t, next, alice, carol)
+	// Neither pull went near the large pack.
+	for _, p := range []*peer{bob, carol} {
+		if has, err := p.objects.Has(whole); err != nil || has {
+			t.Fatalf("%s holds the root of the large pack (%v, %v)", p.id, has, err)
+		}
+	}
+}
+
 func TestAMalformedUploadIsRefusedAndRemoved(t *testing.T) {
 	onEveryBucket(t, aMalformedUploadIsRefusedAndRemoved)
 }

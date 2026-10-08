@@ -103,7 +103,7 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 	}
 	minDedup := func() cli.Flag {
 		return &cli.Float64Flag{Name: "min-dedup", EnvVars: []string{"JACCARD_MIN_DEDUP"}, Value: 0.5,
-			Usage: "upload a patch pack when the nearest base pack holds at least this `FRACTION` of the bytes"}
+			Usage: "upload a patch pack only against a base pack that holds at least this `FRACTION` of the reference's bytes"}
 	}
 	tempDir := func() cli.Flag {
 		return &cli.StringFlag{Name: "temp-dir", EnvVars: []string{"JACCARD_TEMP_DIR"},
