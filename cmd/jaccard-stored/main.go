@@ -71,6 +71,7 @@ type settings struct {
 	urlTTL        time.Duration
 	partSize      int64
 	verifyJobs    int
+	noVerify      bool
 	maxPackBytes  int64
 	bind          netip.AddrPort
 }
@@ -107,6 +108,8 @@ func newApp(stderr io.Writer, run func(context.Context, io.Writer, settings) err
 				Usage: "`SIZE` above which data is uploaded in parts, and of a part"},
 			&cli.IntFlag{Name: "verify-jobs", EnvVars: []string{"JACCARD_VERIFY_JOBS"}, Value: 2,
 				Usage: "packs verified at once; each needs scratch space for its uncompressed data"},
+			&cli.BoolFlag{Name: "no-verify", EnvVars: []string{"JACCARD_NO_VERIFY"},
+				Usage: "record a pack once its objects are in the bucket, without reading its data: one that is incomplete or corrupt is then found by whoever pulls it"},
 			&cli.StringFlag{Name: "bind", EnvVars: []string{"JACCARD_BIND"},
 				Usage: "UDP `IP:PORT` the iroh endpoint binds, for a firewall rule to name; 0.0.0.0:PORT is every IPv4 address (default: every address, a port the system picks)"},
 			&cli.StringFlag{Name: "max-pack-size", EnvVars: []string{"JACCARD_MAX_PACK_SIZE"}, Value: "16GiB",
@@ -139,6 +142,7 @@ func readSettings(c *cli.Context) (settings, error) {
 		uploadTimeout: c.Duration("upload-timeout"),
 		urlTTL:        c.Duration("url-ttl"),
 		verifyJobs:    c.Int("verify-jobs"),
+		noVerify:      c.Bool("no-verify"),
 	}
 	var err error
 	if s.partSize, err = parseSize(c.String("part-size")); err != nil {
@@ -217,6 +221,7 @@ func serve(ctx context.Context, stderr io.Writer, s settings) (err error) {
 		PartSize:      s.partSize,
 		VerifyJobs:    s.verifyJobs,
 		MaxPackBytes:  s.maxPackBytes,
+		NoVerify:      s.noVerify,
 		Log:           log,
 	})
 	if err != nil {
@@ -266,6 +271,9 @@ func serve(ctx context.Context, stderr io.Writer, s settings) (err error) {
 	}
 	defer ep.Shutdown(context.Background())
 	log.Info("serving", "endpoint", ep.ID().String(), "bucket", s.bucket.Bucket)
+	if s.noVerify {
+		log.Warn("packs are recorded without being verified (--no-verify)")
+	}
 
 	wg.Go(func() { srv.RunSweeper(ctx, sweepEvery) })
 	err = srv.Serve(ctx, ep)

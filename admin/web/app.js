@@ -60,6 +60,17 @@ function kindBadge(kind) {
   return h("span", { class: `kind ${kind}` }, kind);
 }
 
+// packKind is the kind of a pack, or of the pack of a reference, with a mark
+// beside it when the server recorded it without verifying it. A reference
+// has the mark for the parent of its pack as well: a pull reads both.
+function packKind(p) {
+  if (p.verified !== false) return kindBadge(p.kind);
+  const title = "name" in p
+    ? "Its pack, or the parent of that, was recorded without being verified: only a pull tells whether the reference is sound"
+    : "Recorded without being verified: only a pull tells whether it is sound";
+  return [kindBadge(p.kind), " ", h("span", { class: "kind unverified", title }, "unverified")];
+}
+
 function tile(label, value, note, meter) {
   return h("div", { class: "tile" },
     h("div", { class: "label" }, label),
@@ -126,7 +137,7 @@ const plural = (n, one, many) => `${count(n)} ${n === 1 ? one : many}`;
 function topColumns(first, second) {
   return [
     { title: "Root", cell: (p) => keyLink(p.root) },
-    { title: "Kind", cell: (p) => kindBadge(p.kind) },
+    { title: "Kind", cell: (p) => packKind(p) },
     first,
     second,
     { title: "Unpacked", num: true, cell: (p) => bytes(p.unpacked_bytes) },
@@ -204,6 +215,8 @@ async function overview() {
     h("p", { class: "footnote" },
       "Sizes are of objects as they are, before compression, down to the packs there are. ",
       "Unpacked is the size the root key of a reference records for its tree; the server takes the key's word for it. ",
+      s.unverified_packs > 0 && `${plural(s.unverified_packs, "pack was", "packs were")} recorded without being verified: ` +
+        "what a patch pack of those shares with its parent is as its client counted it. ",
       waiting.length > 0 && `Not counted: ${waiting.join(" and ")}, which are in the bucket as well.`),
     h("h2", null, "Counts"),
     h("div", { class: "tiles" },
@@ -211,6 +224,7 @@ async function overview() {
       tile("Base packs", count(s.base_packs), "each holds all of one root"),
       tile("Patch packs", count(s.patch_packs), "each holds what its parent lacks"),
       tile("Packs without a reference", count(s.unreferenced_packs), "kept for the patch packs that lean on them"),
+      s.unverified_packs > 0 && tile("Packs not verified", count(s.unverified_packs), "recorded as uploaded: only a pull tells whether they are sound"),
       tile("Open uploads", count(s.uploads)),
       tile("Queued deletions", count(s.deletions), "objects waiting to leave the bucket")),
     h("h2", null, "Packs the most references point at"),
@@ -233,7 +247,7 @@ async function refs() {
   const filter = h("input", { type: "search", placeholder: "Names starting with…", "aria-label": "Prefix of the reference names" });
   const columns = [
     { title: "Name", class: "name", cell: (r) => r.name },
-    { title: "Pack", cell: (r) => [kindBadge(r.kind), " ", keyLink(r.root)] },
+    { title: "Pack", cell: (r) => [packKind(r), " ", keyLink(r.root)] },
     { title: "Unpacked", num: true, cell: (r) => bytes(r.unpacked_bytes) },
     { title: "As objects", num: true, cell: (r) =>
         [bytes(r.ref_bytes), h("div", { class: "sub" }, plural(r.ref_objects, "object", "objects"))] },
@@ -275,7 +289,7 @@ async function refs() {
 async function packs() {
   const columns = [
     { title: "Root", cell: (p) => keyLink(p.root) },
-    { title: "Kind", cell: (p) => kindBadge(p.kind) },
+    { title: "Kind", cell: (p) => packKind(p) },
     { title: "Unpacked", num: true, cell: (p) => bytes(p.unpacked_bytes) },
     { title: "In the pack", num: true, cell: (p) => [bytes(p.bytes), h("div", { class: "sub" }, plural(p.objects, "object", "objects"))] },
     { title: "In the bucket", num: true, cell: (p) => bytes(p.data_size + p.index_size + p.links_size) },
@@ -303,6 +317,9 @@ async function pack(root) {
   const facts = [
     fact("Root", h("span", { class: "key full" }, p.root)),
     fact("Kind", kindBadge(p.kind)),
+    fact("Verified", p.verified
+      ? "yes: the server read its data and walked it from the root"
+      : h("span", { class: "cost" }, "no: recorded as it was uploaded. Only a pull tells whether it is sound.")),
     fact("Uploaded by", h("span", { class: "key full" }, p.uploader)),
     fact("Uploaded", when(p.uploaded_at)),
     fact("Unpacked", bytes(p.unpacked_bytes), " is what the tree of this root comes to, by its key"),
@@ -313,10 +330,14 @@ async function pack(root) {
   if (d.parent) {
     const refBytes = p.bytes + p.shared_bytes;
     const unused = d.parent.bytes - p.shared_bytes;
+    // The server measures what a pack has of its parent when it verifies
+    // the pack, by the links a verified parent has.
+    const measured = p.verified && d.parent.verified;
     facts.push(
-      fact("Parent", keyLink(d.parent.root)),
+      fact("Parent", keyLink(d.parent.root), !d.parent.verified && " (not verified)"),
       fact("From the parent", `${plural(p.shared_objects, "object", "objects")}, ${bytes(p.shared_bytes)}`,
-        refBytes ? ` (${percent(p.shared_bytes / refBytes)} of the reference)` : ""),
+        refBytes ? ` (${percent(p.shared_bytes / refBytes)} of the reference)` : "",
+        !measured && ", as the client that uploaded it counted"),
       fact("Of the parent, unused", `${plural(d.parent.objects - p.shared_objects, "object", "objects")}, ${bytes(unused)}`,
         d.parent.bytes ? ` (${percent(unused / d.parent.bytes)} of the parent)` : ""));
   }

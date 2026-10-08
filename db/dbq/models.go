@@ -31,6 +31,7 @@ type Pack struct {
 	UploadedAt    int64
 	Sketch        []byte
 	Unpacked      int64
+	Verified      int64
 }
 
 type Ref struct {
@@ -46,18 +47,20 @@ type SketchKey struct {
 }
 
 type Upload struct {
-	ID          string
-	Name        string
-	Root        []byte
-	ParentID    sql.NullInt64
-	Uploader    string
-	DataKey     string
-	IndexKey    string
-	LinksKey    string
-	MultipartID sql.NullString
-	DataSize    int64
-	Objects     int64
-	State       string
-	IssuedAt    int64
-	Deadline    int64
+	ID            string
+	Name          string
+	Root          []byte
+	ParentID      sql.NullInt64
+	Uploader      string
+	DataKey       string
+	IndexKey      string
+	LinksKey      string
+	MultipartID   sql.NullString
+	DataSize      int64
+	Objects       int64
+	State         string
+	IssuedAt      int64
+	Deadline      int64
+	SharedObjects int64
+	SharedBytes   int64
 }

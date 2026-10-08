@@ -18,7 +18,7 @@ var variables = []string{
 	"JACCARD_DATA", "JACCARD_S3_BUCKET", "JACCARD_S3_PREFIX", "JACCARD_S3_ENDPOINT",
 	"JACCARD_S3_REGION", "JACCARD_S3_PATH_STYLE", "JACCARD_ADMIN_ADDR",
 	"JACCARD_UPLOAD_TIMEOUT", "JACCARD_URL_TTL", "JACCARD_PART_SIZE", "JACCARD_VERIFY_JOBS",
-	"JACCARD_MAX_PACK_SIZE", "JACCARD_BIND",
+	"JACCARD_MAX_PACK_SIZE", "JACCARD_BIND", "JACCARD_NO_VERIFY",
 }
 
 // settingsFor runs the command with args under env alone and returns the
@@ -76,6 +76,7 @@ func TestEveryVariableIsRead(t *testing.T) {
 		"JACCARD_URL_TTL":        "30m",
 		"JACCARD_PART_SIZE":      "16MiB",
 		"JACCARD_VERIFY_JOBS":    "5",
+		"JACCARD_NO_VERIFY":      "true",
 		"JACCARD_MAX_PACK_SIZE":  "3GiB",
 		"JACCARD_BIND":           "0.0.0.0:4435",
 	})
@@ -92,6 +93,7 @@ func TestEveryVariableIsRead(t *testing.T) {
 		urlTTL:        30 * time.Minute,
 		partSize:      16 << 20,
 		verifyJobs:    5,
+		noVerify:      true,
 		maxPackBytes:  3 << 30,
 		bind:          netip.MustParseAddrPort("0.0.0.0:4435"),
 	}
@@ -113,13 +115,14 @@ func TestFlagWinsOverVariable(t *testing.T) {
 		"JACCARD_URL_TTL":        "30m",
 		"JACCARD_PART_SIZE":      "16MiB",
 		"JACCARD_VERIFY_JOBS":    "5",
+		"JACCARD_NO_VERIFY":      "true",
 		"JACCARD_MAX_PACK_SIZE":  "3GiB",
 		"JACCARD_BIND":           "0.0.0.0:4435",
 	},
 		"--data", "/flag/data", "--s3-bucket", "flag-bucket", "--s3-prefix", "flag/",
 		"--s3-endpoint", "http://flag:9000", "--s3-region", "eu-flag-1", "--s3-path-style=false",
 		"--admin-addr", "127.0.0.1:1", "--upload-timeout", "2h", "--url-ttl", "3h",
-		"--part-size", "8MiB", "--verify-jobs", "7", "--max-pack-size", "1GiB", "--bind", "[::]:5000")
+		"--part-size", "8MiB", "--verify-jobs", "7", "--no-verify=false", "--max-pack-size", "1GiB", "--bind", "[::]:5000")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,6 +165,17 @@ func TestRefusals(t *testing.T) {
 		if _, err := settingsFor(t, nil, args...); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+// Verification is on unless it is turned off.
+func TestNoVerifyIsAskedFor(t *testing.T) {
+	got, err := settingsFor(t, nil, "--data", "/d", "--s3-bucket", "b", "--no-verify")
+	if err != nil || !got.noVerify {
+		t.Fatalf("--no-verify: %+v, %v", got, err)
+	}
+	if got, err = settingsFor(t, nil, "--data", "/d", "--s3-bucket", "b"); err != nil || got.noVerify {
+		t.Fatalf("without --no-verify: %+v, %v", got, err)
 	}
 }
 

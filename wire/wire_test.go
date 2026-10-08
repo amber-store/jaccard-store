@@ -33,6 +33,8 @@ func TestRequestsRoundTrip(t *testing.T) {
 	for _, req := range []wire.Request{
 		{Op: wire.OpPushStart, Name: "a/b", Root: root, Sketch: [][]byte{bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)}},
 		{Op: wire.OpPushUpload, Name: "a/b", Root: root, Parent: bytes.Repeat([]byte{9}, 32), DataSize: 1 << 40, Objects: 12345, Bytes: 1 << 41},
+		{Op: wire.OpPushUpload, Name: "a/b", Root: root, Parent: bytes.Repeat([]byte{9}, 32), DataSize: 10, Objects: 1, Bytes: 20,
+			SharedObjects: 4321, SharedBytes: 1 << 42},
 		{Op: wire.OpPushUpload, Name: "a/b", Root: root},
 		{Op: wire.OpPushCommit, UploadID: "0123456789abcdef"},
 		{Op: wire.OpPull, Name: "a/b"},
@@ -59,9 +61,11 @@ func TestResponsesRoundTrip(t *testing.T) {
 		"pull": {Root: root, Packs: []wire.Pack{
 			{Root: root, Objects: 3, Bytes: 30, DataSize: 20, IndexSize: 148, IndexURL: "https://s3/i", DataURL: "https://s3/d"},
 		}},
-		"list":  {Refs: []wire.Ref{{Name: "a", Root: root}}, More: true},
-		"error": {Error: &wire.Error{Code: wire.CodeMalformedPack, Message: "object missing"}},
-		"empty": {},
+		"committed":            {Root: root},
+		"committed unverified": {Root: root, Unverified: true},
+		"list":                 {Refs: []wire.Ref{{Name: "a", Root: root}}, More: true},
+		"error":                {Error: &wire.Error{Code: wire.CodeMalformedPack, Message: "object missing"}},
+		"empty":                {},
 	} {
 		if got := roundTrip(t, resp); !reflect.DeepEqual(got, resp) {
 			t.Errorf("%s: got %+v, want %+v", name, got, resp)

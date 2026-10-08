@@ -692,3 +692,37 @@ func TestAServerThatCannotBeReachedIsTheStepThatFailed(t *testing.T) {
 		t.Errorf("standard error:\n%s", got)
 	}
 }
+
+// A pack the server took without verifying it is called one wherever a push
+// says what it did: nothing but a pull will tell whether it is sound.
+func TestAPushSaysWhenTheServerDidNotVerify(t *testing.T) {
+	root, parent := key.Key{1, 2, 3}, key.Key{4, 5, 6}
+	for name, res := range map[string]client.PushResult{
+		"base pack":  {Root: root, Objects: 3, DataSize: 2048},
+		"patch pack": {Root: root, Parent: &parent, Objects: 3, DataSize: 2048},
+	} {
+		var out bytes.Buffer
+		printPushed(&out, "ref", root, res)
+		if got := out.String(); !strings.Contains(got, name) || strings.Contains(got, "verified") {
+			t.Errorf("a verified %s is printed as %q", name, got)
+		}
+		if got := outcome(res); !strings.HasPrefix(got, name) || strings.Contains(got, "verified") {
+			t.Errorf("a verified %s comes out as %q", name, got)
+		}
+		res.Unverified = true
+		out.Reset()
+		printPushed(&out, "ref", root, res)
+		if got := out.String(); !strings.Contains(got, name) || !strings.HasSuffix(got, "uploaded, not verified by the server\n") || strings.Count(got, "\n") != 1 {
+			t.Errorf("a %s that was not verified is printed as %q", name, got)
+		}
+		if got := outcome(res); !strings.HasPrefix(got, name) || !strings.HasSuffix(got, ", not verified") {
+			t.Errorf("a %s that was not verified comes out as %q", name, got)
+		}
+	}
+	// What was not uploaded was not taken on trust either.
+	var out bytes.Buffer
+	printPushed(&out, "ref", root, client.PushResult{Root: root, Stored: true})
+	if got := out.String(); strings.Contains(got, "verified") {
+		t.Errorf("a push of a stored root is printed as %q", got)
+	}
+}

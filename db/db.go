@@ -50,6 +50,10 @@ var (
 	// ErrParentGone is returned by CreateUpload when the parent it names is
 	// not the root of a base pack.
 	ErrParentGone = errors.New("db: parent is not a base pack")
+	// ErrShared is returned by CreateUpload when the upload says it shares
+	// more with its parent than the parent holds, or shares anything
+	// without a parent.
+	ErrShared = errors.New("db: more shared than the parent holds")
 )
 
 // maxReaders is the number of connections the reads share. Writes have one

@@ -397,6 +397,63 @@ func TestPatchPackRefused(t *testing.T) {
 	})
 }
 
+// A parent that was recorded without being verified has no links. A patch
+// pack on it is verified as any other, since the walk never goes into the
+// parent; what it shares with the parent is all that is not measured.
+func TestPatchPackOfAParentWithoutLinks(t *testing.T) {
+	dir, root1, objs := ingestTree(t)
+	parent, _ := base(t, root1, objs)
+	changeTree(t, dir)
+	root2, objs2 := ingestPath(t, dir)
+	maps.Copy(objs, objs2)
+	own, shared, _ := patchOf(t, root2, objs, parent)
+	if len(own) == 0 || shared == 0 {
+		t.Fatalf("the versions do not make a patch: %d own, %d shared", len(own), shared)
+	}
+
+	x, data := build(t, objs, own)
+	res, err := Pack(root2, x, bytes.NewReader(data), parent, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Objects != uint64(len(own)) || res.Bytes != uint64(len(data)) {
+		t.Errorf("measured %d objects of %d bytes, want %d of %d", res.Objects, res.Bytes, len(own), len(data))
+	}
+	if res.SharedObjects != 0 || res.SharedBytes != 0 || res.Links != nil {
+		t.Errorf("without the parent's links: shared %d objects of %d bytes, links %v", res.SharedObjects, res.SharedBytes, res.Links)
+	}
+
+	var child key.Key
+	for _, k := range own {
+		if k != root2 && k.Type() == key.Blob {
+			child = k
+		}
+	}
+	t.Run("a child in neither", func(t *testing.T) {
+		x, data := build(t, objs, without(own, child))
+		_, err := Pack(root2, x, bytes.NewReader(data), parent, nil)
+		wantMalformed(t, err, "missing")
+	})
+	t.Run("a key also in the parent", func(t *testing.T) {
+		x, data := build(t, objs, append(slices.Clone(own), parent.Entry(0).Key))
+		_, err := Pack(root2, x, bytes.NewReader(data), parent, nil)
+		wantMalformed(t, err, "also in the parent")
+	})
+	t.Run("altered bytes", func(t *testing.T) {
+		x, data := build(t, objs, own)
+		pos, _ := x.Find(child)
+		data[x.Entry(pos).Offset] ^= 0x80
+		_, err := Pack(root2, x, bytes.NewReader(data), parent, nil)
+		wantMalformed(t, err, child.String())
+	})
+	t.Run("an empty pack of a root in the parent", func(t *testing.T) {
+		x, data := build(t, objs, nil)
+		if _, err := Pack(root1, x, bytes.NewReader(data), parent, nil); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestEmptyPatchPack(t *testing.T) {
 	_, root1, objs := ingestTree(t)
 	parent, links := base(t, root1, objs)
@@ -460,12 +517,11 @@ func TestPackPassesOnReadErrors(t *testing.T) {
 	}
 }
 
-func TestPackWantsBothOrNeitherOfTheParent(t *testing.T) {
+func TestPackWantsLinksThatAreTheParents(t *testing.T) {
 	_, root, objs := ingestTree(t)
 	parent, links := base(t, root, objs)
 	empty, data := build(t, objs, nil)
 	for _, err := range []error{
-		func() error { _, err := Pack(root, empty, bytes.NewReader(data), parent, nil); return err }(),
 		func() error { _, err := Pack(root, empty, bytes.NewReader(data), nil, links); return err }(),
 		func() error {
 			_, err := Pack(root, empty, bytes.NewReader(data), parent, packfile.NewLinks(nil))

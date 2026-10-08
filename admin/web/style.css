@@ -161,6 +161,7 @@ td .sub { color: var(--muted); font-size: 12px; }
 .kind.base { color: var(--base); }
 .kind.patch { color: var(--patch); }
 .kind.verifying { color: var(--warn); }
+.kind.unverified { color: var(--warn); }
 .kind.pending { color: var(--muted); }
 
 dl.facts {

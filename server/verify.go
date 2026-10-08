@@ -27,7 +27,8 @@ func malformedf(format string, args ...any) error {
 }
 
 // pushCommit verifies the pack of an upload and, if it is sound, records it
-// and points the upload's ref at it.
+// and points the upload's ref at it. A server that does not verify records
+// the pack once it has seen that it was uploaded.
 func (s *Server) pushCommit(ctx context.Context, remote string, req wire.Request) wire.Response {
 	if req.UploadID == "" {
 		return wire.Errorf(wire.CodeBadRequest, "upload_id: missing")
@@ -58,8 +59,8 @@ func (s *Server) pushCommit(ctx context.Context, remote string, req wire.Request
 	// A root that has a pack already needs no second one: the upload is
 	// redundant and is committed with nothing verified. That pack can be
 	// collected before the commit lands, though; CommitUpload says so, and
-	// the upload is then verified after all. An unverified upload is never
-	// recorded.
+	// the upload is then verified after all. An upload that was not looked
+	// at is never recorded.
 	var v *db.Verified
 	if _, err := s.db.PackByRoot(ctx, u.Root); errors.Is(err, db.ErrNotFound) {
 		if v, err = s.verified(ctx, remote, u); err != nil {
@@ -82,13 +83,19 @@ func (s *Server) pushCommit(ctx context.Context, remote string, req wire.Request
 			handBack()
 			return s.internal("recording the pack", err)
 		}
-		return wire.Response{Root: pack.Root[:]}
+		return wire.Response{Root: pack.Root[:], Unverified: !pack.Verified}
 	}
 }
 
-// verified verifies the upload u and returns what it found.
+// verified checks the upload u and returns what it found: by verifying its
+// pack, or, on a server that does not verify, by seeing that the pack was
+// uploaded.
 func (s *Server) verified(ctx context.Context, remote string, u db.Upload) (*db.Verified, error) {
-	v, err := s.verifyUpload(ctx, u)
+	check := s.verifyUpload
+	if s.noVerify {
+		check = s.acceptUpload
+	}
+	v, err := check(ctx, u)
 	if err != nil {
 		var bad *malformed
 		if errors.As(err, &bad) {
@@ -129,29 +136,9 @@ func (s *Server) verifyUpload(ctx context.Context, u db.Upload) (db.Verified, er
 		return db.Verified{}, ctx.Err()
 	}
 
-	indexSize := int64(packfile.IndexSize(uint64(u.Objects)))
-	if err := s.checkSize(ctx, "index", u.IndexKey, indexSize); err != nil {
-		return db.Verified{}, err
-	}
-	if err := s.checkSize(ctx, "data", u.DataKey, u.DataSize); err != nil {
-		return db.Verified{}, err
-	}
-
-	raw, err := s.read(ctx, u.IndexKey, indexSize)
+	index, indexSize, err := s.uploaded(ctx, u)
 	if err != nil {
-		return db.Verified{}, fmt.Errorf("index: %w", err)
-	}
-	index, err := packfile.ParseIndex(raw)
-	if err != nil {
-		return db.Verified{}, malformedf("index: %v", err)
-	}
-	if int64(index.Len()) != u.Objects {
-		return db.Verified{}, malformedf("index: %d entries, %d were announced", index.Len(), u.Objects)
-	}
-	// Before a byte of the data is fetched: the index is all it takes to
-	// announce more than the scratch space holds.
-	if index.DataSize() > s.maxPackBytes {
-		return db.Verified{}, malformedf("index: a pack of %d bytes is above this server's limit of %d", index.DataSize(), s.maxPackBytes)
+		return db.Verified{}, err
 	}
 
 	data, err := s.expand(ctx, u, index)
@@ -186,20 +173,101 @@ func (s *Server) verifyUpload(ctx context.Context, u db.Upload) (db.Verified, er
 		SharedObjects: int64(res.SharedObjects),
 		SharedBytes:   int64(res.SharedBytes),
 	}
+	if parent != nil && parentLinks == nil {
+		// A parent that was never verified has no links to measure by. The
+		// pack is sound all the same, and what it shares with that parent
+		// is what the client says.
+		v.SharedObjects, v.SharedBytes = u.SharedObjects, u.SharedBytes
+	}
 	if u.ParentID == 0 {
 		links := res.Links.Encode()
 		if err := s.bucket.Put(ctx, u.LinksKey, links); err != nil {
 			return db.Verified{}, fmt.Errorf("writing the links: %w", err)
 		}
 		v.LinksSize = int64(len(links))
-		// The index is in key order, so its head is the sketch.
-		keys := make([]key.Key, min(index.Len(), sketch.Size))
-		for i := range keys {
-			keys[i] = index.Entry(i).Key
-		}
-		v.Sketch = sketch.Of(keys)
+		v.Sketch = sketchOf(index)
 	}
 	return v, nil
+}
+
+// acceptUpload is what a server that does not verify does in the place of
+// verifyUpload: it sees that the two objects of u are in the bucket, at the
+// sizes the upload announced, and reads the index, which is where the
+// figures of the pack and the sketch of a base pack come from. The data is
+// not read, so whether the objects are what their keys say, and whether
+// they are all the root needs, is the client's word; so is what a patch
+// pack shares with its parent. The one thing the index knows of that is
+// whether the root is in the pack, as it is in every pack that holds
+// anything: that much is looked at. The errors are those of verifyUpload.
+func (s *Server) acceptUpload(ctx context.Context, u db.Upload) (db.Verified, error) {
+	// An index is read whole, and one of a large pack is hundreds of
+	// megabytes: no more of them at once than packs would be verified.
+	select {
+	case s.verifying <- struct{}{}:
+		defer func() { <-s.verifying }()
+	case <-ctx.Done():
+		return db.Verified{}, ctx.Err()
+	}
+
+	index, indexSize, err := s.uploaded(ctx, u)
+	if err != nil {
+		return db.Verified{}, err
+	}
+	if _, ok := index.Find(u.Root); !ok && (index.Len() > 0 || u.ParentID == 0) {
+		return db.Verified{}, malformedf("the root %s is not in the pack", u.Root)
+	}
+	v := db.Verified{
+		IndexSize:     indexSize,
+		Objects:       int64(index.Len()),
+		Bytes:         int64(index.DataSize()),
+		SharedObjects: u.SharedObjects,
+		SharedBytes:   u.SharedBytes,
+		OnTrust:       true,
+	}
+	if u.ParentID == 0 {
+		v.Sketch = sketchOf(index)
+	}
+	return v, nil
+}
+
+// uploaded holds the two objects of u to the sizes its upload announced and
+// returns its index, parsed, with the size of it in the bucket.
+func (s *Server) uploaded(ctx context.Context, u db.Upload) (*packfile.Index, int64, error) {
+	indexSize := int64(packfile.IndexSize(uint64(u.Objects)))
+	if err := s.checkSize(ctx, "index", u.IndexKey, indexSize); err != nil {
+		return nil, 0, err
+	}
+	if err := s.checkSize(ctx, "data", u.DataKey, u.DataSize); err != nil {
+		return nil, 0, err
+	}
+
+	raw, err := s.read(ctx, u.IndexKey, indexSize)
+	if err != nil {
+		return nil, 0, fmt.Errorf("index: %w", err)
+	}
+	index, err := packfile.ParseIndex(raw)
+	if err != nil {
+		return nil, 0, malformedf("index: %v", err)
+	}
+	if int64(index.Len()) != u.Objects {
+		return nil, 0, malformedf("index: %d entries, %d were announced", index.Len(), u.Objects)
+	}
+	// Before a byte of the data is fetched: the index is all it takes to
+	// announce more than the scratch space holds.
+	if index.DataSize() > s.maxPackBytes {
+		return nil, 0, malformedf("index: a pack of %d bytes is above this server's limit of %d", index.DataSize(), s.maxPackBytes)
+	}
+	return index, indexSize, nil
+}
+
+// sketchOf returns the sketch of the pack with the given index. The index is
+// in key order, so its head is the sketch.
+func sketchOf(index *packfile.Index) sketch.Sketch {
+	keys := make([]key.Key, min(index.Len(), sketch.Size))
+	for i := range keys {
+		keys[i] = index.Entry(i).Key
+	}
+	return sketch.Of(keys)
 }
 
 // checkSize holds an uploaded object to the size its upload announced.
@@ -277,7 +345,9 @@ func (s *sourceErr) Read(p []byte) (int, error) {
 }
 
 // parentOf fetches the index and the links of the base pack id. They were
-// verified, or written by this server, when the pack was recorded.
+// verified, or written by this server, when the pack was recorded; a pack
+// that was recorded without being verified has an index that parsed and no
+// links, and the links returned for it are nil.
 func (s *Server) parentOf(ctx context.Context, id int64) (*packfile.Index, *packfile.Links, error) {
 	p, err := s.db.PackByID(ctx, id)
 	if err != nil {
@@ -290,6 +360,9 @@ func (s *Server) parentOf(ctx context.Context, id int64) (*packfile.Index, *pack
 	index, err := packfile.ParseIndex(raw)
 	if err != nil {
 		return nil, nil, fmt.Errorf("index: %w", err)
+	}
+	if p.LinksKey == "" {
+		return index, nil, nil
 	}
 	if raw, err = s.read(ctx, p.LinksKey, p.LinksSize); err != nil {
 		return nil, nil, fmt.Errorf("links: %w", err)

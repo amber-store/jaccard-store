@@ -289,15 +289,21 @@ func minDedupOf(c *cli.Context) (float64, error) {
 // printPushed writes the result of a push: what name points at now and
 // what was uploaded for it.
 func printPushed(w io.Writer, name string, root key.Key, res client.PushResult) {
+	// A server that does not verify has taken the pack as it came: whoever
+	// pushed it should know that nothing but a pull will tell if it is sound.
+	var unverified string
+	if res.Unverified {
+		unverified = ", not verified by the server"
+	}
 	switch {
 	case res.Stored:
 		fmt.Fprintf(w, "%s %s: the server has the pack already\n", name, root)
 	case res.Parent != nil:
-		fmt.Fprintf(w, "%s %s: patch pack of %s, %d objects, %s uploaded\n",
-			name, root, res.Parent, res.Objects, human.Bytes(res.DataSize))
+		fmt.Fprintf(w, "%s %s: patch pack of %s, %d objects, %s uploaded%s\n",
+			name, root, res.Parent, res.Objects, human.Bytes(res.DataSize), unverified)
 	default:
-		fmt.Fprintf(w, "%s %s: base pack, %d objects, %s uploaded\n",
-			name, root, res.Objects, human.Bytes(res.DataSize))
+		fmt.Fprintf(w, "%s %s: base pack, %d objects, %s uploaded%s\n",
+			name, root, res.Objects, human.Bytes(res.DataSize), unverified)
 	}
 }
 

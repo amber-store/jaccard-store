@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,18 +39,32 @@ type clock struct{ t time.Time }
 func (c *clock) Now() time.Time          { return c.t }
 func (c *clock) Advance(d time.Duration) { c.t = c.t.Add(d) }
 
-// flaky is a bucket whose reads or deletes fail on demand.
+// flaky is a bucket whose reads or deletes fail on demand, and which
+// remembers what the server read of it.
 type flaky struct {
 	*bucket.Bucket
 	failGet    bool
 	failDelete bool
+
+	mu   sync.Mutex
+	gets []string
 }
 
 func (f *flaky) Get(ctx context.Context, objectKey string) (io.ReadCloser, error) {
 	if f.failGet {
 		return nil, errors.New("the bucket is away")
 	}
+	f.mu.Lock()
+	f.gets = append(f.gets, objectKey)
+	f.mu.Unlock()
 	return f.Bucket.Get(ctx, objectKey)
+}
+
+// fetched returns the keys the server has read, in the order it read them.
+func (f *flaky) fetched() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.gets)
 }
 
 func (f *flaky) Delete(ctx context.Context, objectKey string) error {
@@ -278,9 +294,18 @@ func httpGet(t *testing.T, url string) []byte {
 // upload opens an upload for the pack and puts its index and data.
 func (h *harness) upload(remote, name string, root key.Key, parent *key.Key, index *packfile.Index, data []byte) wire.Response {
 	h.t.Helper()
+	return h.uploadAs(remote, name, root, parent, index, data, nil)
+}
+
+// uploadAs is upload with a request that announce has had a hand in.
+func (h *harness) uploadAs(remote, name string, root key.Key, parent *key.Key, index *packfile.Index, data []byte, announce func(*wire.Request)) wire.Response {
+	h.t.Helper()
 	req := wire.Request{Op: wire.OpPushUpload, Name: name, Root: root[:], DataSize: uint64(len(data)), Objects: uint64(index.Len())}
 	if parent != nil {
 		req.Parent = parent[:]
+	}
+	if announce != nil {
+		announce(&req)
 	}
 	resp := h.ok(h.handle(remote, req))
 	httpCreate(h.t, resp.IndexURL, index.Encode())

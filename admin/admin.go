@@ -113,11 +113,15 @@ type api struct {
 // pack_bytes is the sum of referenced_pack_bytes, in packs a reference
 // points at, and unreferenced_pack_bytes, in the unreferenced_packs that
 // are kept only because patch packs lean on them.
+//
+// unverified_packs are the packs a server run without verification
+// recorded: what object_bytes has of them is in part their clients' word.
 type statsJSON struct {
 	Refs              int64 `json:"refs"`
 	BasePacks         int64 `json:"base_packs"`
 	PatchPacks        int64 `json:"patch_packs"`
 	UnreferencedPacks int64 `json:"unreferenced_packs"`
+	UnverifiedPacks   int64 `json:"unverified_packs"`
 	Uploads           int64 `json:"uploads"`
 	Deletions         int64 `json:"deletions"`
 
@@ -138,12 +142,16 @@ type statsJSON struct {
 // bucket. For a patch pack the rest of the objects are the shared ones,
 // held by the parent, of which parent_unreachable is what the reference
 // has no use for.
+//
+// verified says that every pack a pull of the reference reads was verified
+// by the server: its own, and the parent of that if it has one.
 type refJSON struct {
 	Name          string `json:"name"`
 	Root          string `json:"root"`
 	UpdatedBy     string `json:"updated_by"`
 	UpdatedAt     string `json:"updated_at"`
 	Kind          string `json:"kind"`
+	Verified      bool   `json:"verified"`
 	UnpackedBytes int64  `json:"unpacked_bytes"`
 	RefObjects    int64  `json:"ref_objects"`
 	RefBytes      int64  `json:"ref_bytes"`
@@ -158,10 +166,14 @@ type refJSON struct {
 	ParentUnreachableBytes   int64   `json:"parent_unreachable_bytes"`
 }
 
+// packJSON is a pack. verified says that the server read its data and
+// walked it from the root; a pack that is not was recorded as it was
+// uploaded, by a server run without verification.
 type packJSON struct {
 	ID            int64   `json:"id"`
 	Root          string  `json:"root"`
 	Kind          string  `json:"kind"`
+	Verified      bool    `json:"verified"`
 	ParentRoot    *string `json:"parent_root"`
 	UnpackedBytes int64   `json:"unpacked_bytes"`
 	Objects       int64   `json:"objects"`
@@ -217,6 +229,7 @@ func (a *api) stats(w http.ResponseWriter, r *http.Request) {
 		BasePacks:         st.BasePacks,
 		PatchPacks:        st.PatchPacks,
 		UnreferencedPacks: st.UnreferencedPacks,
+		UnverifiedPacks:   st.UnverifiedPacks,
 		Uploads:           st.Uploads,
 		Deletions:         st.Deletions,
 
@@ -257,6 +270,7 @@ func (a *api) refs(w http.ResponseWriter, r *http.Request) {
 			UpdatedBy:     in.Ref.UpdatedBy,
 			UpdatedAt:     stamp(in.Ref.UpdatedAt),
 			Kind:          kind(p),
+			Verified:      p.Verified && (in.Parent == nil || in.Parent.Verified),
 			UnpackedBytes: unpacked(p.Root),
 			RefObjects:    p.Objects + p.SharedObjects,
 			RefBytes:      p.Bytes + p.SharedBytes,
@@ -418,6 +432,7 @@ func packOf(in db.PackInfo) packJSON {
 		ID:            p.ID,
 		Root:          p.Root.String(),
 		Kind:          kind(p),
+		Verified:      p.Verified,
 		UnpackedBytes: unpacked(p.Root),
 		Objects:       p.Objects,
 		Bytes:         p.Bytes,

@@ -127,6 +127,11 @@ func TestMigrationFillsTheUnpackedSizes(t *testing.T) {
 	if _, err := old.Exec("INSERT INTO refs (name, pack_id, updated_by, updated_at) VALUES ('one', 1, 'alice', 0), ('two', 3, 'alice', 0)"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := old.Exec(`INSERT INTO uploads
+		(id, name, root, parent_id, uploader, data_key, index_key, links_key, data_size, objects, state, issued_at, deadline)
+		VALUES ('open', 'three', ?, 1, 'alice', 'ud', 'ui', 'ul', 1, 1, 'pending', 0, 0)`, testKeys(t, "open", 1)[0][:]); err != nil {
+		t.Fatal(err)
+	}
 	if err := old.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +152,19 @@ func TestMigrationFillsTheUnpackedSizes(t *testing.T) {
 	// And the figures of the store have them.
 	if s, err := d.Stats(ctx); err != nil || s.UnpackedBytes != int64(roots[0].Length()+roots[2].Length()) {
 		t.Fatalf("Stats = %+v, %v", s, err)
+	}
+	// Every pack of a release that knew of no other kind was verified, and
+	// an upload that was open then says nothing of what it shares.
+	for _, root := range roots {
+		if p := wantPack(t, d, root); !p.Verified {
+			t.Errorf("the pack of %s came out of the migration as not verified", root)
+		}
+	}
+	if s, err := d.Stats(ctx); err != nil || s.UnverifiedPacks != 0 {
+		t.Fatalf("Stats = %+v, %v", s, err)
+	}
+	if u, err := d.UploadByID(ctx, "open"); err != nil || u.SharedObjects != 0 || u.SharedBytes != 0 || u.ParentID != 1 {
+		t.Fatalf("the upload that was open = %+v, %v", u, err)
 	}
 	if err := d.Close(); err != nil {
 		t.Fatal(err)

@@ -88,14 +88,14 @@ const insertPack = `-- name: InsertPack :one
 INSERT INTO packs (
     root, parent_id, data_key, index_key, links_key, data_size, index_size,
     links_size, objects, bytes, shared_objects, shared_bytes, uploader,
-    uploaded_at, sketch, unpacked
+    uploaded_at, sketch, unpacked, verified
 ) VALUES (
     ?1, ?2, ?3,
     ?4, ?5, ?6,
     ?7, ?8, ?9,
     ?10, ?11, ?12,
     ?13, ?14, ?15,
-    ?16
+    ?16, ?17
 )
 RETURNING id
 `
@@ -117,6 +117,7 @@ type InsertPackParams struct {
 	UploadedAt    int64
 	Sketch        []byte
 	Unpacked      int64
+	Verified      int64
 }
 
 // The reads of a pack leave its sketch out: it is some kilobytes, and only
@@ -139,6 +140,7 @@ func (q *Queries) InsertPack(ctx context.Context, arg InsertPackParams) (int64, 
 		arg.UploadedAt,
 		arg.Sketch,
 		arg.Unpacked,
+		arg.Verified,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -163,7 +165,7 @@ func (q *Queries) InsertSketchKey(ctx context.Context, arg InsertSketchKeyParams
 const listPacks = `-- name: ListPacks :many
 SELECT p.id, p.root, p.parent_id, p.data_key, p.index_key, p.links_key,
        p.data_size, p.index_size, p.links_size, p.objects, p.bytes,
-       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at,
+       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at, p.verified,
        parent.root AS parent_root,
        (SELECT count(*) FROM refs AS r WHERE r.pack_id = p.id) AS refs,
        (SELECT count(*) FROM packs AS c WHERE c.parent_id = p.id) AS children
@@ -195,6 +197,7 @@ type ListPacksRow struct {
 	SharedBytes   int64
 	Uploader      string
 	UploadedAt    int64
+	Verified      int64
 	ParentRoot    []byte
 	Refs          int64
 	Children      int64
@@ -225,6 +228,7 @@ func (q *Queries) ListPacks(ctx context.Context, arg ListPacksParams) ([]ListPac
 			&i.SharedBytes,
 			&i.Uploader,
 			&i.UploadedAt,
+			&i.Verified,
 			&i.ParentRoot,
 			&i.Refs,
 			&i.Children,
@@ -245,7 +249,7 @@ func (q *Queries) ListPacks(ctx context.Context, arg ListPacksParams) ([]ListPac
 const packByID = `-- name: PackByID :one
 SELECT id, root, parent_id, data_key, index_key, links_key, data_size,
        index_size, links_size, objects, bytes, shared_objects, shared_bytes,
-       uploader, uploaded_at
+       uploader, uploaded_at, verified
 FROM packs
 WHERE id = ?1
 `
@@ -266,6 +270,7 @@ type PackByIDRow struct {
 	SharedBytes   int64
 	Uploader      string
 	UploadedAt    int64
+	Verified      int64
 }
 
 func (q *Queries) PackByID(ctx context.Context, id int64) (PackByIDRow, error) {
@@ -287,6 +292,7 @@ func (q *Queries) PackByID(ctx context.Context, id int64) (PackByIDRow, error) {
 		&i.SharedBytes,
 		&i.Uploader,
 		&i.UploadedAt,
+		&i.Verified,
 	)
 	return i, err
 }
@@ -294,7 +300,7 @@ func (q *Queries) PackByID(ctx context.Context, id int64) (PackByIDRow, error) {
 const packByRoot = `-- name: PackByRoot :one
 SELECT id, root, parent_id, data_key, index_key, links_key, data_size,
        index_size, links_size, objects, bytes, shared_objects, shared_bytes,
-       uploader, uploaded_at
+       uploader, uploaded_at, verified
 FROM packs
 WHERE root = ?1
 `
@@ -315,6 +321,7 @@ type PackByRootRow struct {
 	SharedBytes   int64
 	Uploader      string
 	UploadedAt    int64
+	Verified      int64
 }
 
 func (q *Queries) PackByRoot(ctx context.Context, root []byte) (PackByRootRow, error) {
@@ -336,6 +343,7 @@ func (q *Queries) PackByRoot(ctx context.Context, root []byte) (PackByRootRow, e
 		&i.SharedBytes,
 		&i.Uploader,
 		&i.UploadedAt,
+		&i.Verified,
 	)
 	return i, err
 }
@@ -402,7 +410,7 @@ func (q *Queries) SharingPacks(ctx context.Context, keys [][]byte) ([]SharingPac
 const topPacksByChildren = `-- name: TopPacksByChildren :many
 SELECT p.id, p.root, p.parent_id, p.data_key, p.index_key, p.links_key,
        p.data_size, p.index_size, p.links_size, p.objects, p.bytes,
-       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at,
+       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at, p.verified,
        (SELECT count(*) FROM refs AS r WHERE r.pack_id = p.id) AS refs,
        count(*) AS children,
        CAST(max(c.shared_bytes) AS INTEGER) AS largest_share
@@ -429,6 +437,7 @@ type TopPacksByChildrenRow struct {
 	SharedBytes   int64
 	Uploader      string
 	UploadedAt    int64
+	Verified      int64
 	Refs          int64
 	Children      int64
 	LargestShare  int64
@@ -461,6 +470,7 @@ func (q *Queries) TopPacksByChildren(ctx context.Context, n int64) ([]TopPacksBy
 			&i.SharedBytes,
 			&i.Uploader,
 			&i.UploadedAt,
+			&i.Verified,
 			&i.Refs,
 			&i.Children,
 			&i.LargestShare,
@@ -481,7 +491,7 @@ func (q *Queries) TopPacksByChildren(ctx context.Context, n int64) ([]TopPacksBy
 const topPacksByRefs = `-- name: TopPacksByRefs :many
 SELECT p.id, p.root, p.parent_id, p.data_key, p.index_key, p.links_key,
        p.data_size, p.index_size, p.links_size, p.objects, p.bytes,
-       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at,
+       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at, p.verified,
        parent.root AS parent_root,
        count(*) AS refs,
        (SELECT count(*) FROM packs AS c WHERE c.parent_id = p.id) AS children,
@@ -510,6 +520,7 @@ type TopPacksByRefsRow struct {
 	SharedBytes   int64
 	Uploader      string
 	UploadedAt    int64
+	Verified      int64
 	ParentRoot    []byte
 	Refs          int64
 	Children      int64
@@ -544,6 +555,7 @@ func (q *Queries) TopPacksByRefs(ctx context.Context, n int64) ([]TopPacksByRefs
 			&i.SharedBytes,
 			&i.Uploader,
 			&i.UploadedAt,
+			&i.Verified,
 			&i.ParentRoot,
 			&i.Refs,
 			&i.Children,
