@@ -15,7 +15,8 @@ import (
 
 // localStore is the store directory core's CLI works on: <dir>/packstore
 // holds the objects, <dir>/refs the references, <dir>/closures what the
-// collector keeps.
+// collector keeps. The store of one command (dir.go) has objects alone,
+// and no refs.
 type localStore struct {
 	dir     string
 	objects *packstore.Store

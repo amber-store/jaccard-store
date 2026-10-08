@@ -18,6 +18,11 @@ import (
 type PullOptions struct {
 	// Progress is told what the pull is doing. Nil means nobody is.
 	Progress Progress
+	// Accept, when it is set, is asked about the reference's root before
+	// anything is fetched. An error from it ends the pull and is what
+	// Pull returns: a caller that can only use some roots does not
+	// download the others to find out.
+	Accept func(root key.Key) error
 }
 
 // PullResult says what a pull did.
@@ -54,6 +59,11 @@ func (c *Client) Pull(ctx context.Context, objects *packstore.Store, name string
 	// else: more packs than that are not the answer to a pull.
 	if len(resp.Packs) == 0 || len(resp.Packs) > 2 {
 		return PullResult{}, fmt.Errorf("pull: the server named %d packs for %q", len(resp.Packs), name)
+	}
+	if opts.Accept != nil {
+		if err := opts.Accept(root); err != nil {
+			return PullResult{}, err
+		}
 	}
 	if len(resp.Packs) == 1 {
 		p.End("in one pack")

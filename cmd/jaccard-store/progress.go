@@ -149,6 +149,38 @@ func (p *progress) End(summary string) {
 	fmt.Fprintln(p.out, line)
 }
 
+// Fail marks the running step as the one err came in, failed or
+// interrupted, and leaves its line. The show goes on: a command that has to
+// tidy up after a failure shows that as a step too. Without a running step
+// it does nothing.
+func (p *progress) Fail(err error) {
+	if p.quiet {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.fail(err)
+}
+
+// fail is Fail with p.mu held.
+func (p *progress) fail(err error) {
+	s := p.step
+	if s == nil {
+		return
+	}
+	p.step = nil
+	took := p.now().Sub(s.start)
+	how := "failed"
+	if errors.Is(err, context.Canceled) {
+		how = "interrupted"
+	}
+	if p.live {
+		fmt.Fprintf(p.out, "\r\033[K%s\n", p.paint(doneLine("✗", s.name, took, how), red))
+		return
+	}
+	fmt.Fprintf(p.out, "%s: %s after %s\n", s.name, how, human.Duration(took))
+}
+
 // Close ends the show. err is how the command went: with an error the step
 // that was running is marked as the one that failed, and without one the
 // time of all steps together is added. Nothing is shown after Close.
@@ -168,21 +200,14 @@ func (p *progress) Close(err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
-	if s := p.step; s != nil {
+	switch {
+	case err != nil:
+		p.fail(err)
+	case p.step != nil:
+		// A step nobody ended, of a command that went well: its line goes.
 		p.step = nil
-		took := now.Sub(s.start)
-		how := "failed"
-		if errors.Is(err, context.Canceled) {
-			how = "interrupted"
-		}
-		switch {
-		case err == nil && p.live:
+		if p.live {
 			fmt.Fprint(p.out, "\r\033[K")
-		case err == nil:
-		case p.live:
-			fmt.Fprintf(p.out, "\r\033[K%s\n", p.paint(doneLine("✗", s.name, took, how), red))
-		default:
-			fmt.Fprintf(p.out, "%s: %s after %s\n", s.name, how, human.Duration(took))
 		}
 	}
 	if err == nil && !p.began.IsZero() {

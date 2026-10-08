@@ -1,11 +1,13 @@
 package e2e
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/amber-store/core/key"
 	"github.com/amber-store/jaccard-store/client"
 	"github.com/amber-store/jaccard-store/packfile"
 	"github.com/amber-store/jaccard-store/server"
@@ -189,4 +191,41 @@ func pushAndPullReportTheirSteps(t *testing.T, s3 backend) {
 	} else {
 		seen.names("looking up the reference", "checking the local store")
 	}
+}
+
+func TestPullAsksAboutTheRootBeforeItFetches(t *testing.T) {
+	onEveryBucket(t, pullAsksAboutTheRootBeforeItFetches)
+}
+
+func pullAsksAboutTheRootBeforeItFetches(t *testing.T, s3 backend) {
+	w := newWorld(t, s3, nil)
+	alice, bob := w.peer("alice"), w.peer("bob")
+	root := alice.ingest(version1())
+	alice.push("v1", root)
+
+	// Turned down, the root costs no download: nothing reaches the store,
+	// and the step the answer came in is the last.
+	unwanted := errors.New("not what was wanted")
+	seen := &steps{t: t}
+	var asked []key.Key
+	_, err := bob.client.Pull(w.ctx, bob.objects, "v1", client.PullOptions{Progress: seen, Accept: func(k key.Key) error {
+		asked = append(asked, k)
+		return unwanted
+	}})
+	if !errors.Is(err, unwanted) || len(asked) != 1 || asked[0] != root {
+		t.Fatalf("pull = %v after asking about %v", err, asked)
+	}
+	if len(seen.list) != 1 || seen.list[0].name != "looking up the reference" || seen.list[0].ended {
+		t.Fatalf("steps of a pull that was turned down: %+v", seen.list)
+	}
+	if has, err := bob.objects.Has(root); err != nil || has {
+		t.Fatalf("the root reached the store all the same (%v, %v)", has, err)
+	}
+
+	// Accepted, the pull goes on as any other.
+	res, err := bob.client.Pull(w.ctx, bob.objects, "v1", client.PullOptions{Accept: func(key.Key) error { return nil }})
+	if err != nil || res.Root != root || res.Packs != 1 {
+		t.Fatalf("pull = %+v, %v", res, err)
+	}
+	sameTree(t, root, alice, bob)
 }
