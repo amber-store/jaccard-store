@@ -44,6 +44,8 @@ and the admin page shows what the store holds and who put it there.
   from the root. Only the new pack is walked; where a path crosses into the
   parent, the key's presence in the parent's index is enough, and the parent
   is assumed sound.
+- The **statistics are computed by the server**, never reported by the
+  client.
 - CLI on `urfave/cli/v2`.
 
 ### 2.2 Made in design, accepted by the owner
@@ -56,9 +58,10 @@ and the admin page shows what the store holds and who put it there.
   enforces structure only.
 - Every object the walk reads is hashed against its key, blobs included, and
   a pack may hold nothing the walk does not reach.
-- The sharing figures of a patch pack (objects and bytes of the reference
-  that the parent holds) are **reported by the client** and bounded by the
-  parent's totals. They are statistics; nothing else depends on them.
+- To compute what a reference reaches in its parent without reading the
+  parent's data, the server writes a third object beside every base pack
+  when it verifies it: the pack's **links**, the children of each object
+  (section 4.3). Awaiting the owner's review.
 - S3 objects of a collected pack are deleted one URL lifetime after the pack
   leaves the database, so URLs already handed out keep working.
 - `ls` and `rm` exist beside `push` and `pull`.
@@ -82,7 +85,8 @@ and the admin page shows what the store holds and who put it there.
 
 ## 4. Pack format
 
-A pack is two S3 objects.
+A pack is two S3 objects written by the client, the index and the data. A
+base pack has a third, the links, written by the server.
 
 ### 4.1 Index
 
@@ -107,10 +111,28 @@ A zstd stream that decompresses to the objects' serialized bytes back to
 back, each once, in any order, with no framing. The window is at most
 64 MiB. The data of an empty pack may be zero bytes long.
 
-### 4.3 Names in the bucket
+### 4.3 Links
 
-`<prefix>packs/<root hex>/<upload id>.idx` and `.data`. The upload ID keeps
-concurrent uploads of one root apart and means nothing is ever renamed.
+Base packs only. The server writes the links after it has verified the
+pack; clients never read them. They record, for every object of the pack,
+which objects it refers to, as positions in the index:
+
+```
+magic     "JACLNK\x00\x01"                     8 bytes
+count     number of index entries, n           8 bytes
+starts    n + 1 positions into children        8 bytes each
+children  index positions                      4 bytes each
+```
+
+The children of the object at index position `i` are
+`children[starts[i]:starts[i+1]]`, each listed once. A base pack holds its
+whole key set, so every child has a position.
+
+### 4.4 Names in the bucket
+
+`<prefix>packs/<root hex>/<upload id>.idx`, `.data` and `.links`. The
+upload ID keeps concurrent uploads of one root apart and means nothing is
+ever renamed.
 
 ## 5. Protocol
 
@@ -147,8 +169,7 @@ then to the lower root.
 ### 5.2 `push-upload`
 
 Request: `name`, `root`, `parent` (root of a base pack, or absent),
-`data_size` (bytes of the compressed data), `objects` (index entries),
-`shared_objects`, `shared_bytes` (zero without a parent).
+`data_size` (bytes of the compressed data), `objects` (index entries).
 
 - If the root has a pack by now: as `stored` above.
 - If `parent` is not a base pack the server knows: `parent_gone`. The client
@@ -222,7 +243,19 @@ At `push-commit` the server:
 The root must be in the pack, unless the pack is empty and the root is in
 the parent.
 
-Anything that fails makes the pack malformed. Verifications run a few at a
+Anything that fails makes the pack malformed.
+
+A pack that passed is then measured (section 8):
+
+- **Base pack**: the walk has seen the children of every object. The server
+  writes them as the pack's links (section 4.3) with its own credentials.
+  Nothing of the reference is shared.
+- **Patch pack**: the server downloads the parent's links. Starting from
+  the keys at which the walk crossed into the parent (the root itself, for
+  an empty pack), it follows the parent's links and marks every position it
+  reaches. The marked positions are the objects of the reference that the
+  parent holds; their lengths, from the parent's index, are the shared
+  bytes. The parent's data is not read. Verifications run a few at a
 time (default 2), which bounds the scratch space to the uncompressed size of
 that many packs. The scratch directory is emptied at start.
 
@@ -240,12 +273,14 @@ CREATE TABLE packs (
   parent_id      INTEGER REFERENCES packs(id),   -- NULL: a base pack
   data_key       TEXT    NOT NULL,
   index_key      TEXT    NOT NULL,
+  links_key      TEXT,               -- base packs only
   data_size      INTEGER NOT NULL,   -- bytes in S3
   index_size     INTEGER NOT NULL,
+  links_size     INTEGER NOT NULL,   -- 0 for a patch pack
   objects        INTEGER NOT NULL,   -- objects in the pack
   bytes          INTEGER NOT NULL,   -- their uncompressed bytes
   shared_objects INTEGER NOT NULL,   -- of the ref, held by the parent
-  shared_bytes   INTEGER NOT NULL,
+  shared_bytes   INTEGER NOT NULL,   -- 0 for a base pack
   uploader       TEXT    NOT NULL,   -- endpoint ID
   uploaded_at    INTEGER NOT NULL,   -- unix seconds
   sketch         BLOB                -- base packs only
@@ -277,8 +312,6 @@ CREATE TABLE uploads (
   multipart_id   TEXT,
   data_size      INTEGER NOT NULL,
   objects        INTEGER NOT NULL,
-  shared_objects INTEGER NOT NULL,
-  shared_bytes   INTEGER NOT NULL,
   state          TEXT    NOT NULL,   -- 'pending' or 'verifying'
   issued_at      INTEGER NOT NULL,
   deadline       INTEGER NOT NULL
@@ -292,8 +325,15 @@ CREATE TABLE deletions (
 );
 ```
 
-`objects` and `bytes` of a pack come from its verified index. The sketch of
-a base pack is the first 256 keys of its index.
+Every figure of a pack is the server's own: `objects` and `bytes` come from
+the verified index, `shared_objects` and `shared_bytes` from the parent's
+links (section 6). The sketch of a base pack is the first 256 keys of its
+index.
+
+An upload owns three keys from the start, `.idx`, `.data` and `.links`,
+whether or not all of them get written. Whatever ends an upload without a
+pack queues all three for deletion, so links written just before a failed
+commit do not stay behind.
 
 ### 7.2 Garbage collection
 
@@ -309,7 +349,7 @@ lifetime ahead.
 Every 30 seconds:
 
 - An upload past its deadline and not being verified is forgotten: its
-  multipart upload is queued for abort, and its two keys are queued for
+  multipart upload is queued for abort, and its keys are queued for
   deletion now and again an hour later, because a PUT that began before the
   deadline can land after it.
 - Due `deletions` are carried out. A row stays until S3 has confirmed.
@@ -339,7 +379,8 @@ Credentials come from the SDK's default chain.
 
 ## 8. Statistics and the admin page
 
-Per pack, and so per ref pointing at it:
+All of it is computed by the server from what it verified. Per pack, and so
+per ref pointing at it:
 
 | figure | from |
 | --- | --- |
@@ -350,7 +391,7 @@ Per pack, and so per ref pointing at it:
 For the store:
 
 - refs, base packs, patch packs, open uploads, queued deletions;
-- bytes in S3: the sum of `data_size + index_size`;
+- bytes in S3: the sum of `data_size + index_size + links_size`;
 - stored bytes: the sum of `bytes` over packs;
 - logical bytes: the sum over refs of the bytes of the ref;
 - deduplication rate: 1 − stored / logical;
@@ -454,6 +495,10 @@ Tests are written before the code they cover.
   or duplicate keys, entries that do not tile, a stream too short or too
   long, an object that does not hash to its key, a missing child, an entry
   the walk does not reach, a key also in the parent, a missing root.
+  The measuring has its own: the links of a base pack round-trip, and the
+  shared objects and bytes of a patch pack equal those of a key set
+  computed directly, including for an empty patch pack and for a parent
+  object reached along two paths.
 - End to end, in one process: a server with real iroh endpoints on loopback
   (relays and discovery off, direct addresses given through the library) and
   an in-process S3 fake, driven through the client library. Covered: a base
@@ -473,7 +518,8 @@ one server on a bucket; more than one level of parents.
 ## 13. Known limits
 
 - Access is open, so anyone who learns the endpoint ID can fill the bucket.
-- The sharing figures are the client's word.
+- Every base pack costs a links object in the bucket, about 8 bytes per
+  object plus 4 per link, and a patch push downloads its parent's.
 - The database is the only record of refs and of which pack leans on which.
   It has to be backed up; the bucket alone does not describe the store.
 - A verification needs scratch space for the uncompressed pack.
