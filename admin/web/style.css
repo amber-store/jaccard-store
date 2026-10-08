@@ -106,6 +106,33 @@ h2 { font-size: 13px; margin: 28px 0 10px; font-weight: 600; color: var(--muted)
 .tile .note { color: var(--muted); font-size: 12px; }
 .tile meter { width: 100%; height: 8px; margin-top: 8px; }
 
+.lede { color: var(--muted); margin: 0 0 12px; max-width: 80ch; }
+.footnote { color: var(--muted); font-size: 12px; margin: 10px 0 0; max-width: 100ch; }
+
+/* The chain of sizes on the overview: a line for every size, the parts of
+   one set in under it, and the last line the sum. */
+table.chain th[scope="row"] {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: inherit;
+  white-space: normal;
+  min-width: 240px;
+}
+table.chain th .sub { color: var(--muted); font-size: 12px; font-weight: 400; }
+table.chain td.num { font-family: var(--mono); }
+table.chain td.bar { width: 30%; min-width: 120px; }
+table.chain meter { width: 100%; height: 10px; display: block; }
+table.chain tr.part th[scope="row"] { padding-left: 36px; font-weight: 400; }
+table.chain tr.part td.num { color: var(--muted); }
+table.chain tr.total th[scope="row"], table.chain tr.total td.num { font-weight: 700; }
+table.chain tr.total td, table.chain tr.total th { border-top: 2px solid var(--line); }
+table.chain tr:last-child th { border-bottom: 0; }
+
+/* A step that costs where it should save, or a pack nothing points at. */
+.cost { color: var(--warn); }
+
 .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 .toolbar input { min-width: 260px; flex: 0 1 360px; }
 

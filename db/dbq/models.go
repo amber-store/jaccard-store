@@ -30,6 +30,7 @@ type Pack struct {
 	Uploader      string
 	UploadedAt    int64
 	Sketch        []byte
+	Unpacked      int64
 }
 
 type Ref struct {

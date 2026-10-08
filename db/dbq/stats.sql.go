@@ -40,46 +40,78 @@ func (q *Queries) CountUploads(ctx context.Context) (int64, error) {
 	return count, err
 }
 
-const logicalBytes = `-- name: LogicalBytes :one
-SELECT CAST(COALESCE(sum(p.bytes + p.shared_bytes), 0) AS INTEGER)
-FROM refs AS r
-JOIN packs AS p ON p.id = r.pack_id
-`
-
-// Over refs, not packs: two refs on one pack count it twice.
-func (q *Queries) LogicalBytes(ctx context.Context) (int64, error) {
-	row := q.db.QueryRowContext(ctx, logicalBytes)
-	var column_1 int64
-	err := row.Scan(&column_1)
-	return column_1, err
-}
-
 const packTotals = `-- name: PackTotals :one
 SELECT count(parent_id) AS patch_packs,
        count(*) - count(parent_id) AS base_packs,
-       CAST(COALESCE(sum(data_size + index_size + links_size), 0) AS INTEGER) AS s3_bytes,
+       CAST(COALESCE(sum(bytes), 0) AS INTEGER) AS pack_bytes,
        CAST(COALESCE(sum(data_size), 0) AS INTEGER) AS data_bytes,
-       CAST(COALESCE(sum(bytes), 0) AS INTEGER) AS stored_bytes
+       CAST(COALESCE(sum(index_size + links_size), 0) AS INTEGER) AS index_bytes
 FROM packs
 `
 
 type PackTotalsRow struct {
-	PatchPacks  int64
-	BasePacks   int64
-	S3Bytes     int64
-	DataBytes   int64
-	StoredBytes int64
+	PatchPacks int64
+	BasePacks  int64
+	PackBytes  int64
+	DataBytes  int64
+	IndexBytes int64
 }
 
+// Every pack once: how many of each kind there are, what their objects come
+// to as they are, and what the bucket holds of them.
 func (q *Queries) PackTotals(ctx context.Context) (PackTotalsRow, error) {
 	row := q.db.QueryRowContext(ctx, packTotals)
 	var i PackTotalsRow
 	err := row.Scan(
 		&i.PatchPacks,
 		&i.BasePacks,
-		&i.S3Bytes,
+		&i.PackBytes,
 		&i.DataBytes,
-		&i.StoredBytes,
+		&i.IndexBytes,
 	)
+	return i, err
+}
+
+const refTotals = `-- name: RefTotals :one
+SELECT CAST(COALESCE(sum(p.unpacked), 0) AS INTEGER) AS unpacked_bytes,
+       CAST(COALESCE(sum(p.bytes + p.shared_bytes), 0) AS INTEGER) AS object_bytes
+FROM refs AS r
+JOIN packs AS p ON p.id = r.pack_id
+`
+
+type RefTotalsRow struct {
+	UnpackedBytes int64
+	ObjectBytes   int64
+}
+
+// Over refs, not packs: two refs on one pack count it twice, as two
+// directories would hold its content twice.
+func (q *Queries) RefTotals(ctx context.Context) (RefTotalsRow, error) {
+	row := q.db.QueryRowContext(ctx, refTotals)
+	var i RefTotalsRow
+	err := row.Scan(&i.UnpackedBytes, &i.ObjectBytes)
+	return i, err
+}
+
+const unreferencedTotals = `-- name: UnreferencedTotals :one
+SELECT count(*) AS packs,
+       CAST(COALESCE(sum(p.bytes), 0) AS INTEGER) AS pack_bytes,
+       CAST(COALESCE(sum(p.data_size), 0) AS INTEGER) AS data_bytes
+FROM packs AS p
+WHERE NOT EXISTS (SELECT 1 FROM refs AS r WHERE r.pack_id = p.id)
+`
+
+type UnreferencedTotalsRow struct {
+	Packs     int64
+	PackBytes int64
+	DataBytes int64
+}
+
+// The packs no ref points at. A pack without a ref is there because
+// something leans on it: patch packs, or an upload that is to become one.
+func (q *Queries) UnreferencedTotals(ctx context.Context) (UnreferencedTotalsRow, error) {
+	row := q.db.QueryRowContext(ctx, unreferencedTotals)
+	var i UnreferencedTotalsRow
+	err := row.Scan(&i.Packs, &i.PackBytes, &i.DataBytes)
 	return i, err
 }

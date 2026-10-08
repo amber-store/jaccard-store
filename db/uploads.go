@@ -203,7 +203,12 @@ func insertPack(ctx context.Context, q *dbq.Queries, u dbq.Upload, v Verified, n
 	if base != (v.Sketch != nil) {
 		return 0, errors.New("db: a base pack needs a sketch, and a patch pack must not have one")
 	}
+	root, err := keyOf(u.Root)
+	if err != nil {
+		return 0, err
+	}
 	params := dbq.InsertPackParams{
+		Unpacked:      unpackedOf(root),
 		Root:          u.Root,
 		ParentID:      u.ParentID,
 		DataKey:       u.DataKey,

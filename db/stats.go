@@ -8,12 +8,40 @@ import (
 )
 
 // Stats are the figures of the store as a whole.
+//
+// The sizes are a chain. Each is what the one before comes to after one
+// more thing the store does to save room:
+//
+//	UnpackedBytes    every ref unpacked into a directory of its own
+//	ObjectBytes      content addressing: each ref the objects it is made
+//	                 of, every object once. One pack for each ref would
+//	                 hold this, uncompressed.
+//	PackBytes        packs shared between refs: what the packs that are
+//	                 there hold, uncompressed
+//	DataBytes        compression: what the bucket holds of them
+//
+// The third can be more than the second. A patch pack saves its ref the
+// objects its parent holds, and a pack that several refs point at is there
+// once; but a pack that no ref points at any more, kept because patch
+// packs lean on it, is all there whatever part of it they use. So
+// PackBytes is given in its two parts as well: ReferencedPackBytes, which
+// is never more than ObjectBytes, and UnreferencedPackBytes, which is what
+// the sharing costs.
 type Stats struct {
 	Refs, BasePacks, PatchPacks, Uploads, Deletions int64
-	S3Bytes                                         int64 // data + index + links
-	DataBytes                                       int64 // data only
-	StoredBytes                                     int64 // uncompressed bytes in packs
-	LogicalBytes                                    int64 // over refs: bytes + shared_bytes of the pack
+	// UnreferencedPacks are the packs no ref points at.
+	UnreferencedPacks int64
+
+	UnpackedBytes int64 // over refs: the tree of each, as its root key sizes it
+	ObjectBytes   int64 // over refs: bytes + shared_bytes of the pack
+	PackBytes     int64 // over packs: their objects, uncompressed
+	DataBytes     int64 // over packs: their data in the bucket
+	IndexBytes    int64 // over packs: their indexes and links in the bucket
+
+	// Of PackBytes and DataBytes, what is in packs a ref points at and in
+	// packs none does.
+	ReferencedPackBytes, UnreferencedPackBytes int64
+	UnreferencedDataBytes                      int64
 }
 
 // Stats returns the figures of the store, all read at one moment.
@@ -28,15 +56,24 @@ func (d *DB) Stats(ctx context.Context) (s Stats, err error) {
 		if s.Deletions, err = q.CountDeletions(ctx); err != nil {
 			return err
 		}
-		if s.LogicalBytes, err = q.LogicalBytes(ctx); err != nil {
-			return err
-		}
-		totals, err := q.PackTotals(ctx)
+		refs, err := q.RefTotals(ctx)
 		if err != nil {
 			return err
 		}
-		s.BasePacks, s.PatchPacks = totals.BasePacks, totals.PatchPacks
-		s.S3Bytes, s.DataBytes, s.StoredBytes = totals.S3Bytes, totals.DataBytes, totals.StoredBytes
+		s.UnpackedBytes, s.ObjectBytes = refs.UnpackedBytes, refs.ObjectBytes
+		packs, err := q.PackTotals(ctx)
+		if err != nil {
+			return err
+		}
+		s.BasePacks, s.PatchPacks = packs.BasePacks, packs.PatchPacks
+		s.PackBytes, s.DataBytes, s.IndexBytes = packs.PackBytes, packs.DataBytes, packs.IndexBytes
+		unreferenced, err := q.UnreferencedTotals(ctx)
+		if err != nil {
+			return err
+		}
+		s.UnreferencedPacks = unreferenced.Packs
+		s.UnreferencedPackBytes, s.UnreferencedDataBytes = unreferenced.PackBytes, unreferenced.DataBytes
+		s.ReferencedPackBytes = s.PackBytes - s.UnreferencedPackBytes
 		return nil
 	})
 	return s, err
@@ -149,6 +186,77 @@ func (d *DB) ListPacks(ctx context.Context, afterID int64, limit int) ([]PackInf
 	})
 	if err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// TopPack is a pack in one of the lists of TopPacks.
+type TopPack struct {
+	PackInfo
+	// LargestShare is the most of the pack's bytes that one of the patch
+	// packs leaning on it uses: 0 when none leans on it. Against the
+	// pack's own bytes it says what a pull of such a patch pack fetches
+	// for nothing.
+	LargestShare int64
+}
+
+// TopPacks returns the packs the most is hung on, at most n of each kind
+// and the most first: those the most refs point at, and those the most
+// patch packs lean on. A pack that has neither is in neither list.
+func (d *DB) TopPacks(ctx context.Context, n int) (byRefs, byChildren []TopPack, err error) {
+	err = d.read(ctx, func(q *dbq.Queries) error {
+		refs, err := q.TopPacksByRefs(ctx, atMost(n))
+		if err != nil {
+			return err
+		}
+		byRefs = make([]TopPack, len(refs))
+		for i, r := range refs {
+			row := packRow{
+				ID: r.ID, Root: r.Root, ParentID: r.ParentID, DataKey: r.DataKey, IndexKey: r.IndexKey, LinksKey: r.LinksKey,
+				DataSize: r.DataSize, IndexSize: r.IndexSize, LinksSize: r.LinksSize, Objects: r.Objects, Bytes: r.Bytes,
+				SharedObjects: r.SharedObjects, SharedBytes: r.SharedBytes, Uploader: r.Uploader, UploadedAt: r.UploadedAt,
+			}
+			if byRefs[i], err = topPackOf(row, r.ParentRoot, r.Refs, r.Children, r.LargestShare); err != nil {
+				return err
+			}
+		}
+		children, err := q.TopPacksByChildren(ctx, atMost(n))
+		if err != nil {
+			return err
+		}
+		byChildren = make([]TopPack, len(children))
+		for i, r := range children {
+			row := packRow{
+				ID: r.ID, Root: r.Root, ParentID: r.ParentID, DataKey: r.DataKey, IndexKey: r.IndexKey, LinksKey: r.LinksKey,
+				DataSize: r.DataSize, IndexSize: r.IndexSize, LinksSize: r.LinksSize, Objects: r.Objects, Bytes: r.Bytes,
+				SharedObjects: r.SharedObjects, SharedBytes: r.SharedBytes, Uploader: r.Uploader, UploadedAt: r.UploadedAt,
+			}
+			if byChildren[i], err = topPackOf(row, nil, r.Refs, r.Children, r.LargestShare); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return byRefs, byChildren, nil
+}
+
+// topPackOf makes a TopPack of a row and what was counted beside it.
+// parentRoot is nil for a base pack.
+func topPackOf(row packRow, parentRoot []byte, refs, children, largestShare int64) (TopPack, error) {
+	p, err := packOf(row)
+	if err != nil {
+		return TopPack{}, err
+	}
+	out := TopPack{PackInfo: PackInfo{Pack: p, Refs: refs, Children: children}, LargestShare: largestShare}
+	if !p.IsBase() {
+		root, err := keyOf(parentRoot)
+		if err != nil {
+			return TopPack{}, err
+		}
+		out.ParentRoot = &root
 	}
 	return out, nil
 }

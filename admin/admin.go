@@ -6,8 +6,12 @@
 // told otherwise, and whoever exposes it further is expected to put
 // something in front of it.
 //
-// Everything the page shows was computed by the server from packs it
-// verified (package verify); nothing is a client's word.
+// What the page shows was computed by the server from packs it verified
+// (package verify), with one exception: what a reference comes to when it
+// is unpacked is the size its root key records. A key is checked against
+// its object by the object's hash, and for a directory the size is not
+// part of what is hashed, so that figure is the word of whoever built the
+// tree.
 package admin
 
 import (
@@ -16,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
@@ -43,6 +48,7 @@ func Handler(d *db.DB) http.Handler {
 	mux.HandleFunc("GET /api/refs", a.refs)
 	mux.HandleFunc("GET /api/packs", a.packs)
 	mux.HandleFunc("GET /api/packs/{root}", a.pack)
+	mux.HandleFunc("GET /api/top", a.top)
 	mux.HandleFunc("GET /api/uploads", a.uploads)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "no such resource")
@@ -94,31 +100,59 @@ type api struct {
 	db *db.DB
 }
 
+// statsJSON is the store in figures. The sizes are a chain, each what the
+// one before comes to after one more saving (db.Stats):
+//
+//	unpacked_bytes   every reference unpacked into a directory of its own
+//	object_bytes     each reference as its distinct objects: one pack for
+//	                 every reference would hold this, uncompressed
+//	pack_bytes       the packs there are, uncompressed
+//	data_bytes       their data in the bucket, compressed
+//	s3_bytes         and with their indexes and links: all the bucket holds
+//
+// pack_bytes is the sum of referenced_pack_bytes, in packs a reference
+// points at, and unreferenced_pack_bytes, in the unreferenced_packs that
+// are kept only because patch packs lean on them.
 type statsJSON struct {
-	Refs         int64   `json:"refs"`
-	BasePacks    int64   `json:"base_packs"`
-	PatchPacks   int64   `json:"patch_packs"`
-	Uploads      int64   `json:"uploads"`
-	Deletions    int64   `json:"deletions"`
-	S3Bytes      int64   `json:"s3_bytes"`
-	DataBytes    int64   `json:"data_bytes"`
-	StoredBytes  int64   `json:"stored_bytes"`
-	LogicalBytes int64   `json:"logical_bytes"`
-	DedupRate    float64 `json:"dedup_rate"`
-	Compression  float64 `json:"compression"`
+	Refs              int64 `json:"refs"`
+	BasePacks         int64 `json:"base_packs"`
+	PatchPacks        int64 `json:"patch_packs"`
+	UnreferencedPacks int64 `json:"unreferenced_packs"`
+	Uploads           int64 `json:"uploads"`
+	Deletions         int64 `json:"deletions"`
+
+	UnpackedBytes int64 `json:"unpacked_bytes"`
+	ObjectBytes   int64 `json:"object_bytes"`
+	PackBytes     int64 `json:"pack_bytes"`
+	DataBytes     int64 `json:"data_bytes"`
+	IndexBytes    int64 `json:"index_bytes"`
+	S3Bytes       int64 `json:"s3_bytes"`
+
+	ReferencedPackBytes   int64 `json:"referenced_pack_bytes"`
+	UnreferencedPackBytes int64 `json:"unreferenced_pack_bytes"`
+	UnreferencedDataBytes int64 `json:"unreferenced_data_bytes"`
 }
 
+// refJSON is a reference with the same sizes, for itself: unpacked, as its
+// distinct objects, and what its own pack holds of them and takes in the
+// bucket. For a patch pack the rest of the objects are the shared ones,
+// held by the parent, of which parent_unreachable is what the reference
+// has no use for.
 type refJSON struct {
-	Name                     string  `json:"name"`
-	Root                     string  `json:"root"`
-	UpdatedBy                string  `json:"updated_by"`
-	UpdatedAt                string  `json:"updated_at"`
-	Kind                     string  `json:"kind"`
-	RefObjects               int64   `json:"ref_objects"`
-	RefBytes                 int64   `json:"ref_bytes"`
-	SharedObjects            int64   `json:"shared_objects"`
-	SharedBytes              int64   `json:"shared_bytes"`
-	Dedup                    float64 `json:"dedup"`
+	Name          string `json:"name"`
+	Root          string `json:"root"`
+	UpdatedBy     string `json:"updated_by"`
+	UpdatedAt     string `json:"updated_at"`
+	Kind          string `json:"kind"`
+	UnpackedBytes int64  `json:"unpacked_bytes"`
+	RefObjects    int64  `json:"ref_objects"`
+	RefBytes      int64  `json:"ref_bytes"`
+	PackObjects   int64  `json:"pack_objects"`
+	PackBytes     int64  `json:"pack_bytes"`
+	PackDataSize  int64  `json:"pack_data_size"`
+	SharedObjects int64  `json:"shared_objects"`
+	SharedBytes   int64  `json:"shared_bytes"`
+
 	ParentRoot               *string `json:"parent_root"`
 	ParentUnreachableObjects int64   `json:"parent_unreachable_objects"`
 	ParentUnreachableBytes   int64   `json:"parent_unreachable_bytes"`
@@ -129,6 +163,7 @@ type packJSON struct {
 	Root          string  `json:"root"`
 	Kind          string  `json:"kind"`
 	ParentRoot    *string `json:"parent_root"`
+	UnpackedBytes int64   `json:"unpacked_bytes"`
 	Objects       int64   `json:"objects"`
 	Bytes         int64   `json:"bytes"`
 	DataSize      int64   `json:"data_size"`
@@ -140,6 +175,14 @@ type packJSON struct {
 	UploadedAt    string  `json:"uploaded_at"`
 	Refs          int64   `json:"refs"`
 	Children      int64   `json:"children"`
+}
+
+// topPackJSON is a pack in one of the lists of the packs the most is hung
+// on. largest_share is the most of its bytes that one of the patch packs
+// leaning on it uses.
+type topPackJSON struct {
+	packJSON
+	LargestShare int64 `json:"largest_share"`
 }
 
 type packDetailJSON struct {
@@ -169,24 +212,25 @@ func (a *api) stats(w http.ResponseWriter, r *http.Request) {
 		failed(w, err)
 		return
 	}
-	out := statsJSON{
-		Refs:         st.Refs,
-		BasePacks:    st.BasePacks,
-		PatchPacks:   st.PatchPacks,
-		Uploads:      st.Uploads,
-		Deletions:    st.Deletions,
-		S3Bytes:      st.S3Bytes,
-		DataBytes:    st.DataBytes,
-		StoredBytes:  st.StoredBytes,
-		LogicalBytes: st.LogicalBytes,
-	}
-	if st.LogicalBytes > 0 {
-		out.DedupRate = 1 - float64(st.StoredBytes)/float64(st.LogicalBytes)
-	}
-	if st.StoredBytes > 0 {
-		out.Compression = float64(st.DataBytes) / float64(st.StoredBytes)
-	}
-	reply(w, out)
+	reply(w, statsJSON{
+		Refs:              st.Refs,
+		BasePacks:         st.BasePacks,
+		PatchPacks:        st.PatchPacks,
+		UnreferencedPacks: st.UnreferencedPacks,
+		Uploads:           st.Uploads,
+		Deletions:         st.Deletions,
+
+		UnpackedBytes: st.UnpackedBytes,
+		ObjectBytes:   st.ObjectBytes,
+		PackBytes:     st.PackBytes,
+		DataBytes:     st.DataBytes,
+		IndexBytes:    st.IndexBytes,
+		S3Bytes:       st.DataBytes + st.IndexBytes,
+
+		ReferencedPackBytes:   st.ReferencedPackBytes,
+		UnreferencedPackBytes: st.UnreferencedPackBytes,
+		UnreferencedDataBytes: st.UnreferencedDataBytes,
+	})
 }
 
 func (a *api) refs(w http.ResponseWriter, r *http.Request) {
@@ -213,13 +257,14 @@ func (a *api) refs(w http.ResponseWriter, r *http.Request) {
 			UpdatedBy:     in.Ref.UpdatedBy,
 			UpdatedAt:     stamp(in.Ref.UpdatedAt),
 			Kind:          kind(p),
+			UnpackedBytes: unpacked(p.Root),
 			RefObjects:    p.Objects + p.SharedObjects,
 			RefBytes:      p.Bytes + p.SharedBytes,
+			PackObjects:   p.Objects,
+			PackBytes:     p.Bytes,
+			PackDataSize:  p.DataSize,
 			SharedObjects: p.SharedObjects,
 			SharedBytes:   p.SharedBytes,
-		}
-		if out.RefBytes > 0 {
-			out.Dedup = float64(p.SharedBytes) / float64(out.RefBytes)
 		}
 		if in.Parent != nil {
 			root := in.Parent.Root.String()
@@ -299,6 +344,35 @@ func (a *api) pack(w http.ResponseWriter, r *http.Request) {
 	reply(w, out)
 }
 
+// topLimit is how many packs each list of the top has unless asked
+// otherwise.
+const topLimit = 20
+
+// top answers with the packs the most is hung on: those the most
+// references point at, and those the most patch packs lean on.
+func (a *api) top(w http.ResponseWriter, r *http.Request) {
+	limit := topLimit
+	if r.URL.Query().Has("limit") {
+		var ok bool
+		if limit, ok = limitOf(w, r); !ok {
+			return
+		}
+	}
+	byRefs, byChildren, err := a.db.TopPacks(r.Context(), limit)
+	if err != nil {
+		failed(w, err)
+		return
+	}
+	list := func(packs []db.TopPack) []topPackJSON {
+		out := make([]topPackJSON, 0, len(packs))
+		for _, p := range packs {
+			out = append(out, topPackJSON{packJSON: packOf(p.PackInfo), LargestShare: p.LargestShare})
+		}
+		return out
+	}
+	reply(w, map[string]any{"by_refs": list(byRefs), "by_children": list(byChildren)})
+}
+
 func (a *api) uploads(w http.ResponseWriter, r *http.Request) {
 	ups, err := a.db.ListUploads(r.Context())
 	if err != nil {
@@ -344,6 +418,7 @@ func packOf(in db.PackInfo) packJSON {
 		ID:            p.ID,
 		Root:          p.Root.String(),
 		Kind:          kind(p),
+		UnpackedBytes: unpacked(p.Root),
 		Objects:       p.Objects,
 		Bytes:         p.Bytes,
 		DataSize:      p.DataSize,
@@ -361,6 +436,12 @@ func packOf(in db.PackInfo) packJSON {
 		out.ParentRoot = &root
 	}
 	return out
+}
+
+// unpacked is what the tree of root comes to when it is unpacked: the size
+// its key records.
+func unpacked(root key.Key) int64 {
+	return int64(min(root.Length(), math.MaxInt64))
 }
 
 func kind(p db.Pack) string {

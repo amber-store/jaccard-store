@@ -77,13 +77,37 @@ announcing terabytes.
 
 ### Admin page
 
-`http://127.0.0.1:8080` shows the number of references and packs, the bytes
-in the bucket, the deduplication rate, every reference with how much of it
-its parent holds and how much of the parent it cannot reach, and every pack
-with who uploaded it and when. The figures are the server's own, computed
-from the packs it verified. The page is read-only and has no
-authentication, which is why it listens on loopback. On loopback it answers
-only to a loopback address or `localhost` as the host name.
+`http://127.0.0.1:8080` shows what the references of the store come to, as
+a chain of sizes in which each is the one before after one more saving:
+
+| the references, as | what it is |
+| --- | --- |
+| unpacked | every reference in a directory of its own |
+| one pack for each reference | content addressing: within a reference every object once |
+| the packs there are | sharing: patch packs lean on base packs, and references of the same content are one pack |
+| pack data in the bucket | compression |
+| in the bucket | with the indexes and links beside the data |
+
+The third is given in two parts, because it can be more than the second:
+what is in packs that references point at, which is what sharing saves,
+and what is in packs no reference points at any more, kept whole for the
+patch packs that lean on them, which is what sharing costs.
+
+Under the chain are the counts, the twenty packs the most references point
+at and the twenty the most patch packs lean on, the latter with the most
+that one of those patch packs uses of the pack. The other views list every
+reference with the same sizes for itself (unpacked, as objects, in its own
+pack, from its parent, and what of the parent it has no use for), every
+pack with who uploaded it and when, and the open uploads.
+
+The sizes are the server's own, computed from the packs it verified, but
+for one: unpacked is the size a reference's root key records for its tree,
+and the server takes the key's word for it. Objects queued for deletion
+and open uploads are in the bucket too and are not counted.
+
+The page is read-only and has no authentication, which is why it listens
+on loopback. On loopback it answers only to a loopback address or
+`localhost` as the host name.
 
 ## Docker
 
