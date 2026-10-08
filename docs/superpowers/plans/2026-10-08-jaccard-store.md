@@ -1,6 +1,6 @@
 # jaccard-store Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** A server over iroh that keeps references as base and patch packs in an S3 bucket, with a client library, a CLI and an embedded admin page.
 
@@ -594,105 +594,105 @@ Tasks 1 and 2 share an owner. Tasks 1+2, 4, 5 and 6 are independent of each othe
 
 **Files:** `packfile/index.go`, `writer.go`, `reader.go`, `links.go`, and a `_test.go` beside each.
 
-- [ ] Tests for the index: round trip; `Find` and `Has`; `ByOffset`; and one refusal each for bad magic, a short header, a length that does not match the count, more than `MaxEntries`, a count of 2^60 in a 16-byte file (no allocation: compare with the file size first), unsorted keys, duplicate keys, a non-canonical key, a length above `amberpack.MaxPayload`, a gap, an overlap, a first offset above 0, and an offset near 2^64 whose end overflows.
-- [ ] `index.go`.
-- [ ] Tests for the writer and readers: objects added in one order come back from `Objects` in offset order with their bytes; an empty pack writes nothing and reads as nothing; a key added twice fails at `Finish`; `Objects` and `Expand` refuse a stream cut short, a stream with bytes left over, and a stream whose window is above `MaxWindow` (build one with `zstd.WithWindowSize(128<<20)`); `Expand` never writes past `DataSize`.
-- [ ] `writer.go`, `reader.go`. The encoder is klauspost's at its default level; the decoder is built with `zstd.WithDecoderMaxWindow(MaxWindow)` and `zstd.WithDecoderConcurrency(1)`.
-- [ ] Tests for links: round trip; repeats dropped; a child position at or above n refused; starts that decrease or run past the children refused; a count that differs from n refused.
-- [ ] `links.go`.
-- [ ] `nix develop -c go test ./packfile` green, `go vet` clean.
+- [x] Tests for the index: round trip; `Find` and `Has`; `ByOffset`; and one refusal each for bad magic, a short header, a length that does not match the count, more than `MaxEntries`, a count of 2^60 in a 16-byte file (no allocation: compare with the file size first), unsorted keys, duplicate keys, a non-canonical key, a length above `amberpack.MaxPayload`, a gap, an overlap, a first offset above 0, and an offset near 2^64 whose end overflows.
+- [x] `index.go`.
+- [x] Tests for the writer and readers: objects added in one order come back from `Objects` in offset order with their bytes; an empty pack writes nothing and reads as nothing; a key added twice fails at `Finish`; `Objects` and `Expand` refuse a stream cut short, a stream with bytes left over, and a stream whose window is above `MaxWindow` (build one with `zstd.WithWindowSize(128<<20)`); `Expand` never writes past `DataSize`.
+- [x] `writer.go`, `reader.go`. The encoder is klauspost's at its default level; the decoder is built with `zstd.WithDecoderMaxWindow(MaxWindow)` and `zstd.WithDecoderConcurrency(1)`.
+- [x] Tests for links: round trip; repeats dropped; a child position at or above n refused; starts that decrease or run past the children refused; a count that differs from n refused.
+- [x] `links.go`.
+- [x] `nix develop -c go test ./packfile` green, `go vet` clean.
 
 ### Task 2: verify
 
 **Files:** `verify/object.go`, `verify.go`, tests beside them. Test trees are built by ingesting a temporary directory with core (`ingest.Objects`), which yields real objects of every type.
 
-- [ ] Tests for `Object`: a blob, a file node and a directory leaf pass; a flipped byte fails; a blob whose key carries another length fails.
-- [ ] `object.go`, after `verifyObject` in core's `packstore/verify.go` (it is unexported there).
-- [ ] Tests for `Pack`, base: a whole key set passes and its `Links` name every child; one object left out fails as missing; one object extra fails as unreached; an object whose bytes were altered fails; a root that is not in the pack fails; a ref of one object passes.
-- [ ] Tests for `Pack`, patch: a patch against a base of an earlier version of the tree passes, and `SharedObjects` and `SharedBytes` equal the intersection of the two key sets computed directly; a key also in the parent fails; a child in neither fails; an empty patch whose root is in the parent passes with the root's closure as shared; an empty patch whose root is not in the parent fails; a parent object reached along two paths is counted once.
-- [ ] `verify.go`: breadth first from the root, a bitmap over the index for visited, children through `fstree.ChildKeys`; the crossings into the parent are collected and then followed through `parentLinks`.
-- [ ] `nix develop -c go test ./verify` green.
+- [x] Tests for `Object`: a blob, a file node and a directory leaf pass; a flipped byte fails; a blob whose key carries another length fails.
+- [x] `object.go`, after `verifyObject` in core's `packstore/verify.go` (it is unexported there).
+- [x] Tests for `Pack`, base: a whole key set passes and its `Links` name every child; one object left out fails as missing; one object extra fails as unreached; an object whose bytes were altered fails; a root that is not in the pack fails; a ref of one object passes.
+- [x] Tests for `Pack`, patch: a patch against a base of an earlier version of the tree passes, and `SharedObjects` and `SharedBytes` equal the intersection of the two key sets computed directly; a key also in the parent fails; a child in neither fails; an empty patch whose root is in the parent passes with the root's closure as shared; an empty patch whose root is not in the parent fails; a parent object reached along two paths is counted once.
+- [x] `verify.go`: breadth first from the root, a bitmap over the index for visited, children through `fstree.ChildKeys`; the crossings into the parent are collected and then followed through `parentLinks`.
+- [x] `nix develop -c go test ./verify` green.
 
 ### Task 3: wire
 
 **Files:** `wire/wire.go`, `wire_test.go`.
 
-- [ ] Tests: a request and a response of every operation round-trip; a frame above `MaxFrame` is refused before it is read; a truncated frame is an error; `Error` formats as `code: message`.
-- [ ] `wire.go`.
+- [x] Tests: a request and a response of every operation round-trip; a frame above `MaxFrame` is refused before it is read; a truncated frame is an error; `Error` formats as `code: message`.
+- [x] `wire.go`.
 
 ### Task 4: db
 
 **Files:** as in the file structure; `db/generate.go` holds `//go:generate sqlc generate -f ../sqlc.yaml`. The pattern for opening modernc SQLite in WAL mode with embedded migrations is `../clamp/store/sqlite.go` and `schema.go`.
 
-- [ ] The schema of spec 7.1 in `db/migrations/0001_init.sql`, with `links_key TEXT NOT NULL` added to `uploads`.
-- [ ] Tests, then code, for packs and `Nearest`: three base packs with known overlaps come back in order of similarity with the estimates `sketch.Jaccard` gives; a patch pack is never a candidate; a query sharing no key gets nothing; ties go to the lower root.
-- [ ] Tests, then code, for refs and collection: a ref moved off a pack collects it and queues its keys at `deleteAt`; two refs on one pack, one deleted, keeps it; a base pack with a child survives the loss of its own ref and goes when the child's ref goes, both in one call; a base pack named by an open upload survives; `ListRefs` pages by `after` and matches `%`, `_` and `\` in a prefix literally.
-- [ ] Tests, then code, for uploads and deletions: `CreateUpload` with a parent that is a patch pack or unknown is `ErrParentGone`; `BeginVerify` by another uploader is `ErrNotFound`, twice is `ErrBusy`; `CommitUpload` writes pack, sketch keys and ref and removes the upload; `CommitUpload` when the root has a pack queues the upload's three keys and points the ref at the old pack; `FailUpload` queues three keys and, for a multipart upload, the abort; `ExpireUploads` leaves `verifying` uploads and uploads before their deadline alone and queues the keys twice; `ResetVerifying`; `DueDeletions` returns only what is due and `DoneDeletion` removes it; everything survives `Close` and `Open`.
-- [ ] Tests, then code, for `Stats`, `ListRefInfo`, `ListPacks`, `PackDetail`.
-- [ ] `nix develop -c sh -c 'cd db && go generate && cd .. && go test ./db'` green; `db/dbq` committed.
+- [x] The schema of spec 7.1 in `db/migrations/0001_init.sql`, with `links_key TEXT NOT NULL` added to `uploads`.
+- [x] Tests, then code, for packs and `Nearest`: three base packs with known overlaps come back in order of similarity with the estimates `sketch.Jaccard` gives; a patch pack is never a candidate; a query sharing no key gets nothing; ties go to the lower root.
+- [x] Tests, then code, for refs and collection: a ref moved off a pack collects it and queues its keys at `deleteAt`; two refs on one pack, one deleted, keeps it; a base pack with a child survives the loss of its own ref and goes when the child's ref goes, both in one call; a base pack named by an open upload survives; `ListRefs` pages by `after` and matches `%`, `_` and `\` in a prefix literally.
+- [x] Tests, then code, for uploads and deletions: `CreateUpload` with a parent that is a patch pack or unknown is `ErrParentGone`; `BeginVerify` by another uploader is `ErrNotFound`, twice is `ErrBusy`; `CommitUpload` writes pack, sketch keys and ref and removes the upload; `CommitUpload` when the root has a pack queues the upload's three keys and points the ref at the old pack; `FailUpload` queues three keys and, for a multipart upload, the abort; `ExpireUploads` leaves `verifying` uploads and uploads before their deadline alone and queues the keys twice; `ResetVerifying`; `DueDeletions` returns only what is due and `DoneDeletion` removes it; everything survives `Close` and `Open`.
+- [x] Tests, then code, for `Stats`, `ListRefInfo`, `ListPacks`, `PackDetail`.
+- [x] `nix develop -c sh -c 'cd db && go generate && cd .. && go test ./db'` green; `db/dbq` committed.
 
 ### Task 5: bucket
 
 **Files:** `bucket/bucket.go`, `bucket_test.go`. Tests run against `gofakes3` with the `s3mem` backend behind `httptest.NewServer`, path style, static credentials.
 
-- [ ] Tests: `Put`, `Size`, `Get`, `Delete`; `Size` of an absent key is `ErrNotFound`; `Delete` of an absent key succeeds; a `PresignPut` URL takes a plain `http.NewRequest("PUT", ...)` and the object is there; a `PresignGet` URL returns it; a multipart upload of three parts through `PresignPart` URLs, completed by POSTing the XML body to the `PresignComplete` URL with plain HTTP, yields the joined object; `AbortMultipart` of a finished or unknown upload succeeds; `Key` formats as the spec says, with and without a prefix.
-- [ ] `bucket.go`. `PresignComplete` builds `POST <object url>?uploadId=<id>` and signs it with `v4.Signer.PresignHTTP` (service `s3`, payload hash `UNSIGNED-PAYLOAD`, `X-Amz-Expires` in the query); the rest uses `s3.Client` and `s3.PresignClient`.
-- [ ] `nix develop -c go test ./bucket` green.
+- [x] Tests: `Put`, `Size`, `Get`, `Delete`; `Size` of an absent key is `ErrNotFound`; `Delete` of an absent key succeeds; a `PresignPut` URL takes a plain `http.NewRequest("PUT", ...)` and the object is there; a `PresignGet` URL returns it; a multipart upload of three parts through `PresignPart` URLs, completed by POSTing the XML body to the `PresignComplete` URL with plain HTTP, yields the joined object; `AbortMultipart` of a finished or unknown upload succeeds; `Key` formats as the spec says, with and without a prefix.
+- [x] `bucket.go`. `PresignComplete` builds `POST <object url>?uploadId=<id>` and signs it with `v4.Signer.PresignHTTP` (service `s3`, payload hash `UNSIGNED-PAYLOAD`, `X-Amz-Expires` in the query); the rest uses `s3.Client` and `s3.PresignClient`.
+- [x] `nix develop -c go test ./bucket` green.
 
 ### Task 6: node
 
 **Files:** `node/key.go`, `serve.go`, `dial.go`, tests. The code to follow is transport-iroh's: `../transport-iroh/cmd/amber-serve/main.go` and `addrs.go` for the server, `cmd/amber/dial.go` for the client.
 
-- [ ] Tests for the key file: created on first use with mode 0600 and read back the same; a file of another shape is an error that does not echo its contents.
-- [ ] `key.go`.
-- [ ] Test: a server bound with `Local` and a client dialing it with `Addrs` exchange a message over a stream, and the server sees the client's endpoint ID as `RemoteID`.
-- [ ] `serve.go`, `dial.go`.
-- [ ] `nix develop -c go test ./node` green.
+- [x] Tests for the key file: created on first use with mode 0600 and read back the same; a file of another shape is an error that does not echo its contents.
+- [x] `key.go`.
+- [x] Test: a server bound with `Local` and a client dialing it with `Addrs` exchange a message over a stream, and the server sees the client's endpoint ID as `RemoteID`.
+- [x] `serve.go`, `dial.go`.
+- [x] `nix develop -c go test ./node` green.
 
 ### Task 7: server
 
 **Files:** as in the file structure. Tests drive `Handle` directly with a real `db.DB` in a temporary directory and a real `bucket.Bucket` on gofakes3, uploading with plain HTTP; a fake clock is passed as `Config.Now`.
 
-- [ ] Tests, then code, for `push-start`: an unknown root gets candidates with distances and working index URLs; a known root is `stored` and the ref points at it; a sketch that is empty, unsorted or of 5000 keys is `bad_request`; a bad name is `bad_request`.
-- [ ] Tests, then code, for `push-upload`: one PUT for small data, parts for data above `PartSize` with `ceil(size/part)` URLs; an unknown parent is `parent_gone`; the upload row carries three keys.
-- [ ] Tests, then code, for `push-commit` (`server/verify.go`): a good base pack is recorded with links in the bucket and a sketch in the database; a good patch pack is recorded with the server's shared figures; wrong sizes, a bad index and a pack failing the walk are `malformed_pack` and leave nothing in the bucket after a sweep; somebody else's upload is `unknown_upload`; a bucket that fails is `internal` and the upload is pending again.
-- [ ] Tests, then code, for `pull`, `list`, `delete`.
-- [ ] Tests, then code, for `Sweep`: an expired upload's objects and multipart upload are gone; an upload being verified is left; a deletion that fails stays queued; `New` resets `verifying` and empties the scratch directory.
-- [ ] `Serve`: one goroutine per connection and per stream, one frame in, one frame out.
+- [x] Tests, then code, for `push-start`: an unknown root gets candidates with distances and working index URLs; a known root is `stored` and the ref points at it; a sketch that is empty, unsorted or of 5000 keys is `bad_request`; a bad name is `bad_request`.
+- [x] Tests, then code, for `push-upload`: one PUT for small data, parts for data above `PartSize` with `ceil(size/part)` URLs; an unknown parent is `parent_gone`; the upload row carries three keys.
+- [x] Tests, then code, for `push-commit` (`server/verify.go`): a good base pack is recorded with links in the bucket and a sketch in the database; a good patch pack is recorded with the server's shared figures; wrong sizes, a bad index and a pack failing the walk are `malformed_pack` and leave nothing in the bucket after a sweep; somebody else's upload is `unknown_upload`; a bucket that fails is `internal` and the upload is pending again.
+- [x] Tests, then code, for `pull`, `list`, `delete`.
+- [x] Tests, then code, for `Sweep`: an expired upload's objects and multipart upload are gone; an upload being verified is left; a deletion that fails stays queued; `New` resets `verifying` and empties the scratch directory.
+- [x] `Serve`: one goroutine per connection and per stream, one frame in, one frame out.
 
 ### Task 8: client
 
 **Files:** as in the file structure.
 
-- [ ] Tests for `client/http.go` against `httptest`: PUT with a content length; GET; the multipart upload sends parts in parallel, collects ETags, POSTs the completion XML, and treats a 200 answer carrying `<Error>` as a failure.
-- [ ] `http.go`.
-- [ ] `push.go`, `pull.go`, `client.go` per spec 9.1 and 9.2; their tests are Task 11's.
+- [x] Tests for `client/http.go` against `httptest`: PUT with a content length; GET; the multipart upload sends parts in parallel, collects ETags, POSTs the completion XML, and treats a 200 answer carrying `<Error>` as a failure.
+- [x] `http.go`.
+- [x] `push.go`, `pull.go`, `client.go` per spec 9.1 and 9.2; their tests are Task 11's.
 
 ### Task 9: admin
 
 **Files:** `admin/admin.go`, `admin_test.go`, `admin/web/*`.
 
-- [ ] Tests through `httptest` for every route against a database filled through package `db`: the figures of spec 8, 404 for an unknown root, paging.
-- [ ] `admin.go`.
-- [ ] The page: overview, refs, packs with detail, uploads; hash routing; no build step; no external resources.
+- [x] Tests through `httptest` for every route against a database filled through package `db`: the figures of spec 8, 404 for an unknown root, paging.
+- [x] `admin.go`.
+- [x] The page: overview, refs, packs with detail, uploads; hash routing; no build step; no external resources.
 
 ### Task 10: commands
 
 **Files:** `cmd/jaccard-stored/main.go`, `cmd/jaccard-store/main.go`, `store.go`, tests for flag and environment parsing.
 
-- [ ] `jaccard-stored`: flags and variables of spec 7.5; opens the database, the bucket, the endpoint, runs `Serve`, the sweeper and the admin listener until a signal.
-- [ ] `jaccard-store`: flags and variables of spec 9.3; `push`, `pull`, `ls`, `rm`. Local refs are core `reference` records; a pull writes inside the collector's span, as core's CLI does (`cmd/amber-store/store.go`, `ref.go` in core).
-- [ ] Tests: every variable is read, and the flag wins over it.
+- [x] `jaccard-stored`: flags and variables of spec 7.5; opens the database, the bucket, the endpoint, runs `Serve`, the sweeper and the admin listener until a signal.
+- [x] `jaccard-store`: flags and variables of spec 9.3; `push`, `pull`, `ls`, `rm`. Local refs are core `reference` records; a pull writes inside the collector's span, as core's CLI does (`cmd/amber-store/store.go`, `ref.go` in core).
+- [x] Tests: every variable is read, and the flag wins over it.
 
 ### Task 11: end to end
 
 **Files:** `e2e/doc.go`, `e2e/e2e_test.go`.
 
-- [ ] One process: gofakes3, `server.New`, `node.Bind` with `Local`, `node.Dial` with `Addrs`, two local core stores. Cases: a base pack; a second version pushed as a patch pack and pulled into an empty store, equal to the source; a root already stored; a ref moved and the old packs gone from the bucket after sweeps past the URL lifetime; an upload that expires, single and multipart; a malformed upload refused and removed; the multipart path with a 5 MiB part size; two clients pushing one root at once; a pull that skips the parent because the store has its content; a ref of one object; a ref whose root sits in a base pack.
+- [x] One process: gofakes3, `server.New`, `node.Bind` with `Local`, `node.Dial` with `Addrs`, two local core stores. Cases: a base pack; a second version pushed as a patch pack and pulled into an empty store, equal to the source; a root already stored; a ref moved and the old packs gone from the bucket after sweeps past the URL lifetime; an upload that expires, single and multipart; a malformed upload refused and removed; the multipart path with a 5 MiB part size; two clients pushing one root at once; a pull that skips the parent because the store has its content; a ref of one object; a ref whose root sits in a base pack.
 
 ### Task 12: finish
 
-- [ ] `README.md`: what it is, the two commands, the variables, the limits of spec 13.
-- [ ] Remove `tools/deps.go`, `go mod tidy`, full `go vet ./...` and `go test -race ./...`.
-- [ ] Create the private repository `amber-store/jaccard-store` and push.
-- [ ] A fresh review of the whole branch against the spec.
+- [x] `README.md`: what it is, the two commands, the variables, the limits of spec 13.
+- [x] Remove `tools/deps.go`, `go mod tidy`, full `go vet ./...` and `go test -race ./...`.
+- [x] Create the private repository `amber-store/jaccard-store` and push.
+- [x] A fresh review of the whole branch against the spec.

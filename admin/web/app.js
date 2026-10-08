@@ -6,8 +6,9 @@
 const view = document.getElementById("view");
 const PAGE = 100;
 
-// h builds an element: h("td", {class: "num"}, "12"). Children are nodes
-// or strings; a string becomes a text node.
+// h builds an element: h("td", {class: "num"}, "12"). Children are nodes,
+// strings, or lists of them however deep; a string becomes a text node, and
+// null and false are left out.
 function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
   for (const [name, value] of Object.entries(attrs || {})) {
@@ -18,7 +19,7 @@ function h(tag, attrs, ...children) {
       el.setAttribute(name, value === true ? "" : String(value));
     }
   }
-  for (const child of children.flat()) {
+  for (const child of children.flat(Infinity)) {
     if (child == null || child === false) continue;
     el.append(child instanceof Node ? child : document.createTextNode(String(child)));
   }
@@ -86,9 +87,13 @@ function paged(columns, load, cursor, empty) {
     const after = rows.length ? cursor(rows[rows.length - 1]) : "";
     const page = await load(after);
     rows = rows.concat(page.rows);
-    holder.replaceChildren(
-      table(columns, rows, empty),
-      page.more && h("button", { class: "more", type: "button", on: { click: () => next().catch(showError) } }, "Load more"));
+    // replaceChildren turns anything that is not a node into text, so the
+    // button is left out, not passed as false.
+    const nodes = [table(columns, rows, empty)];
+    if (page.more) {
+      nodes.push(h("button", { class: "more", type: "button", on: { click: () => next().catch(showError) } }, "Load more"));
+    }
+    holder.replaceChildren(...nodes);
   }
   return { holder, next };
 }
@@ -250,7 +255,7 @@ async function show() {
   const turn = ++showing;
   try {
     const nodes = await render();
-    if (turn === showing) view.replaceChildren(...nodes.flat());
+    if (turn === showing) view.replaceChildren(...nodes.flat(Infinity));
   } catch (err) {
     if (turn === showing) showError(err);
   }

@@ -1,7 +1,9 @@
 # jaccard-store: design
 
-Date: 2026-10-08. Status: approved in conversation, awaiting review of this
-document.
+Date: 2026-10-08. Status: approved by the owner and implemented. Where the
+code was found to need something this document did not say (an index for a
+cascade, the order of options on the command line), the document was brought
+in line.
 
 ## 1. Purpose
 
@@ -61,7 +63,7 @@ and the admin page shows what the store holds and who put it there.
 - To compute what a reference reaches in its parent without reading the
   parent's data, the server writes a third object beside every base pack
   when it verifies it: the pack's **links**, the children of each object
-  (section 4.3). Awaiting the owner's review.
+  (section 4.3).
 - S3 objects of a collected pack are deleted one URL lifetime after the pack
   leaves the database, so URLs already handed out keep working.
 - `ls` and `rm` exist beside `push` and `pull`.
@@ -126,8 +128,8 @@ children  index positions                      4 bytes each
 ```
 
 The children of the object at index position `i` are
-`children[starts[i]:starts[i+1]]`, each listed once. A base pack holds its
-whole key set, so every child has a position.
+`children[starts[i]:starts[i+1]]`, ascending and each listed once. A base
+pack holds its whole key set, so every child has a position.
 
 ### 4.4 Names in the bucket
 
@@ -293,6 +295,7 @@ CREATE TABLE sketch_keys (            -- base packs only
   pack_id INTEGER NOT NULL REFERENCES packs(id) ON DELETE CASCADE,
   PRIMARY KEY (key, pack_id)
 ) WITHOUT ROWID;
+CREATE INDEX sketch_keys_pack ON sketch_keys(pack_id);  -- for the cascade
 
 CREATE TABLE refs (
   name       TEXT    PRIMARY KEY,
@@ -310,6 +313,7 @@ CREATE TABLE uploads (
   uploader       TEXT    NOT NULL,
   data_key       TEXT    NOT NULL,
   index_key      TEXT    NOT NULL,
+  links_key      TEXT    NOT NULL,
   multipart_id   TEXT,
   data_size      INTEGER NOT NULL,
   objects        INTEGER NOT NULL,
@@ -340,10 +344,11 @@ commit do not stay behind.
 
 A pack is live while a ref points at it, a pack names it as parent, or an
 open upload names it as parent. Whenever a ref moves or is deleted, or an
-upload ends without a pack, the server deletes the packs that are no longer
-live, repeating until none is left (a patch can free its base), in the same
-transaction. Their S3 keys go to `deletions` with `not_before` one URL
-lifetime ahead.
+upload ends, the server deletes, in the same transaction, the pack that lost
+the hold if nothing else holds it, and after a patch pack its base in turn.
+Only those packs are looked at: a pack is never recorded without the ref
+that holds it, so nothing else can have died. Their S3 keys go to
+`deletions` with `not_before` one URL lifetime ahead.
 
 ### 7.3 Sweeper
 
@@ -466,11 +471,13 @@ take them.
 
 ```
 jaccard-store --store DIR --server ENDPOINT_ID [--key FILE] COMMAND
-  push REF [--as NAME] [--min-dedup 0.5]
-  pull NAME [--as REF]
+  push [--as NAME] [--min-dedup 0.5] REF
+  pull [--as REF] NAME
   ls [PREFIX]
   rm NAME
 ```
+
+Options come before the argument, as with core's CLI.
 
 Every option can be given as a flag or as an environment variable. The flag
 wins when both are set.
@@ -492,6 +499,7 @@ and mDNS and uses the relay as fallback path.
 ## 10. Layout
 
 ```
+keyset/     the order of keys every package agrees on
 sketch/     bottom-k sketch and the Jaccard estimate
 packfile/   index and data: encode, decode, lookup, the pack builder
 verify/     the walk of section 6
@@ -504,6 +512,7 @@ admin/      the HTTP API; admin/web is the page
 client/     push, pull, list, delete
 cmd/jaccard-stored/
 cmd/jaccard-store/
+e2e/        the end-to-end tests
 ```
 
 Go through the flake's dev shell, as in the sibling repositories.

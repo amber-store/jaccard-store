@@ -1,8 +1,8 @@
 // Command jaccard-store pushes references from a local Amber-Store Core
 // store to a jaccard-store server and pulls them back.
 //
-//	jaccard-store --store DIR --server ENDPOINT_ID push REF [--as NAME] [--min-dedup F]
-//	jaccard-store --store DIR --server ENDPOINT_ID pull NAME [--as REF]
+//	jaccard-store --store DIR --server ENDPOINT_ID push [--as NAME] [--min-dedup F] REF
+//	jaccard-store --store DIR --server ENDPOINT_ID pull [--as REF] NAME
 //	jaccard-store --server ENDPOINT_ID ls [PREFIX]
 //	jaccard-store --server ENDPOINT_ID rm NAME
 //
@@ -93,6 +93,8 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 				Name:      "push",
 				Usage:     "make NAME on the server point at what the local reference REF points at, uploading a pack if the server lacks it",
 				ArgsUsage: "REF",
+				// Options come before REF: the flag package stops at the
+				// first argument that is not one.
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "as", Usage: "`NAME` of the reference on the server (default: REF)"},
 					&cli.Float64Flag{Name: "min-dedup", EnvVars: []string{"JACCARD_MIN_DEDUP"}, Value: 0.5,
