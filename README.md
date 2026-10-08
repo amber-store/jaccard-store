@@ -196,6 +196,31 @@ remove it however they end, an interrupt included.
   a push builds its pack beside it: `--temp-dir` puts it on a disk that has
   the room.
 
+Every directory in a directory becomes a reference of its own with
+`push-subdirs`:
+
+```sh
+jaccard-store push-subdirs --prefix projects/ ./checkouts
+```
+
+- Each directory of the first level is pushed as `push-dir` would push it,
+  under the name `--prefix` and the directory's name. The prefix is put
+  before the name as it is, so it wants its own `/` at the end. It has to
+  be given; `--prefix ''` asks for names without one.
+- Directories in directories go with the one they are in. Files and
+  symbolic links beside the directories are left out, and so is a
+  directory that the `.amberignore` of the parent names, unless
+  `--no-ignore`. A directory whose name begins with a dot is a directory
+  like any other.
+- Five are pushed at a time; `--jobs` changes that. Directories that are
+  pushed at the same time cannot become patch packs of one another, since
+  none of them is on the server yet: with `--jobs 1` each can lean on the
+  ones before it.
+- A directory that fails does not stop the others. All are tried; the
+  command then lists the ones that were not pushed, each with its error,
+  and exits with a status that is not zero. What was pushed is printed as
+  `push-dir` prints it, by name.
+
 Options come before the arguments, as with core's CLI.
 
 | flag | environment | default |
@@ -203,10 +228,12 @@ Options come before the arguments, as with core's CLI.
 | `--store DIR` | `JACCARD_STORE`, then `AMBER_STORE` | required for push and pull |
 | `--server ENDPOINT_ID` | `JACCARD_SERVER` | required |
 | `--key FILE` | `JACCARD_KEY` | `jaccard-store/client.key` in the user's configuration directory |
-| `push --min-dedup F`, `push-dir --min-dedup F` | `JACCARD_MIN_DEDUP` | `0.5` |
-| `push-dir --no-ignore` | `JACCARD_NO_IGNORE` | `.amberignore` files are honored |
-| `push-dir --temp-dir DIR`, `pull-dir --temp-dir DIR` | `JACCARD_TEMP_DIR` | the system's temporary directory |
-| `--no-progress` on push, pull, push-dir and pull-dir | `JACCARD_NO_PROGRESS` | progress is shown |
+| `--min-dedup F` on push, push-dir and push-subdirs | `JACCARD_MIN_DEDUP` | `0.5` |
+| `--no-ignore` on push-dir and push-subdirs | `JACCARD_NO_IGNORE` | `.amberignore` files are honored |
+| `--temp-dir DIR` on push-dir, pull-dir and push-subdirs | `JACCARD_TEMP_DIR` | the system's temporary directory |
+| `push-subdirs --prefix PREFIX` | `JACCARD_PREFIX` | required |
+| `push-subdirs --jobs N`, `-j N` | `JACCARD_JOBS` | `5` |
+| `--no-progress` on push, pull, push-dir, pull-dir and push-subdirs | `JACCARD_NO_PROGRESS` | progress is shown |
 
 The key file is created on first use. Its endpoint ID is what the server
 records as the uploader of a pack.
@@ -244,6 +271,20 @@ uploading: 124.11 MiB in 2 parts (9.4s)
 of the push and the pull: scanning the directory and importing it before,
 reading the tree and extracting it after, and cleaning up at the end. A
 step that fails keeps its mark while the temporary store is removed.
+
+`push-subdirs` does several things at once and shows them at once: a row
+for every directory that is being pushed, with what is being done to it
+and the bar, the rate and the time left of that step, and under the rows a
+count of the directories with the time left for all of them. A directory
+that is done leaves a line above the rows.
+
+```
+✓ docs                         1.5s  base pack, 18.25 KiB
+✗ bad@name                     0.0s  failed: reference "projects/bad@name": reference name must not co
+⠼ assets                         3s  uploading  █████▌░░   68.1%  29.27 / 42.98 MiB   13.48 MiB/s  eta 1s
+⠼ api                            3s  verifying
+  7 directories                  3s  ██████████▋░░░░░░░░░░░░░░   42.9%  2 pushed, 1 failed, 4 running  eta 5s
+```
 
 The result of the command goes to standard output as before.
 `--no-progress` leaves standard error to the errors; `NO_COLOR` keeps the

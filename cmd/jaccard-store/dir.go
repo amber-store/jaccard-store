@@ -58,7 +58,7 @@ func (t *tempStore) remove() error {
 // err is how the command went until here: the step it failed in is marked
 // before this one begins. What comes back is err, and with it whatever
 // kept the store from being removed.
-func discard(temp *tempStore, show *progress, err error) error {
+func discard(temp *tempStore, show reporter, err error) error {
 	if err != nil {
 		show.Fail(err)
 	}
@@ -77,7 +77,7 @@ func runPushDir(c *cli.Context, connect dialer) error {
 		return fmt.Errorf("push-dir takes two arguments DIR and NAME, got %d", c.NArg())
 	}
 	dir, name := c.Args().Get(0), c.Args().Get(1)
-	minDedup, err := minDedupOf(c)
+	how, err := dirPushOf(c)
 	if err != nil {
 		return err
 	}
@@ -103,27 +103,50 @@ func runPushDir(c *cli.Context, connect dialer) error {
 		return err
 	}
 	defer server.Close()
-	temp, err := newTempStore(c.String("temp-dir"))
-	if err != nil {
-		show.Close(err)
-		return err
-	}
-	var res client.PushResult
-	opts := ingestDefaults
-	opts.NoIgnore = c.Bool("no-ignore")
-	root, err := importDir(c.Context, temp.objects, dir, opts, show)
-	if err == nil {
-		// The pack is built beside the store and goes with it.
-		res, err = server.Push(c.Context, temp.localStore, name, root,
-			client.PushOptions{MinDedup: minDedup, TempDir: temp.dir, Progress: show})
-	}
-	err = discard(temp, show, err)
+	root, res, err := how.push(c.Context, server, dir, name, show)
 	show.Close(err)
 	if err != nil {
 		return err
 	}
 	printPushed(c.App.Writer, name, root, res)
 	return nil
+}
+
+// dirPush is how a directory is pushed: what push-dir and push-subdirs
+// take from their flags.
+type dirPush struct {
+	minDedup float64
+	noIgnore bool
+	tempDir  string
+}
+
+func dirPushOf(c *cli.Context) (dirPush, error) {
+	minDedup, err := minDedupOf(c)
+	return dirPush{minDedup: minDedup, noIgnore: c.Bool("no-ignore"), tempDir: c.String("temp-dir")}, err
+}
+
+// push takes the directory dir to the server as the reference name, through
+// a store of its own that it removes again. show is told the steps, the
+// cleaning up included, and of a step that fails; ending the show is the
+// caller's.
+func (h dirPush) push(ctx context.Context, server remote, dir, name string, show reporter) (key.Key, client.PushResult, error) {
+	if err := reference.ValidateName(name); err != nil {
+		return key.Key{}, client.PushResult{}, fmt.Errorf("reference %q: %w", name, err)
+	}
+	temp, err := newTempStore(h.tempDir)
+	if err != nil {
+		return key.Key{}, client.PushResult{}, err
+	}
+	var res client.PushResult
+	opts := ingestDefaults
+	opts.NoIgnore = h.noIgnore
+	root, err := importDir(ctx, temp.objects, dir, opts, show)
+	if err == nil {
+		// The pack is built beside the store and goes with it.
+		res, err = server.Push(ctx, temp.localStore, name, root,
+			client.PushOptions{MinDedup: h.minDedup, TempDir: temp.dir, Progress: show})
+	}
+	return root, res, discard(temp, show, err)
 }
 
 // ingestDefaults are the options a directory is imported with: core's own,
@@ -134,7 +157,7 @@ var ingestDefaults = ingest.Opts{}
 // importDir builds the tree of dir and writes its objects to objects, in
 // two steps: scanning says how much there is to read, importing reads it.
 // It returns the tree's root.
-func importDir(ctx context.Context, objects *packstore.Store, dir string, opts ingest.Opts, show *progress) (key.Key, error) {
+func importDir(ctx context.Context, objects *packstore.Store, dir string, opts ingest.Opts, show reporter) (key.Key, error) {
 	show.Begin("scanning the directory", 0, client.NoUnit)
 	files, size, err := ingest.ScanWith(dir, opts)
 	if err != nil {
@@ -169,7 +192,7 @@ func importDir(ctx context.Context, objects *packstore.Store, dir string, opts i
 
 // importing passes the bytes a build has read on as the progress of the
 // running step.
-type importing struct{ show *progress }
+type importing struct{ show reporter }
 
 func (importing) FileDone()        {}
 func (i importing) AddBytes(n int) { i.show.Advance(int64(n)) }
@@ -257,7 +280,7 @@ func vacant(dest string) error {
 // The tree is written beside dest and moved there when it is whole: a
 // directory of the name asked for is never half of one, and an extraction
 // that fails leaves nothing behind.
-func extract(ctx context.Context, objects *packstore.Store, root key.Key, dest string, show *progress) (files, size uint64, err error) {
+func extract(ctx context.Context, objects *packstore.Store, root key.Key, dest string, show reporter) (files, size uint64, err error) {
 	// Neither the export nor the extraction knows of ctx: an interrupt
 	// reaches them here, where they read an object.
 	get := func(k key.Key) ([]byte, error) {

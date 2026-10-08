@@ -5,6 +5,7 @@
 //	jaccard-store --store DIR --server ENDPOINT_ID pull [--as REF] [--no-progress] NAME
 //	jaccard-store --server ENDPOINT_ID push-dir [--min-dedup F] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR NAME
 //	jaccard-store --server ENDPOINT_ID pull-dir [--temp-dir DIR] [--no-progress] NAME DIR
+//	jaccard-store --server ENDPOINT_ID push-subdirs --prefix PREFIX [--jobs N] [--min-dedup F] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR
 //	jaccard-store --server ENDPOINT_ID ls [PATTERN...]
 //	jaccard-store --server ENDPOINT_ID rm PATTERN...
 //
@@ -12,7 +13,8 @@
 // refstore); ingesting into it and restoring from it are that CLI's job.
 // push-dir and pull-dir need no store: they take a directory to the server
 // and bring one back through a store they make for the one command and
-// remove again (dir.go).
+// remove again (dir.go). push-subdirs is push-dir for every directory in a
+// directory, several at a time (subdirs.go).
 // The server is named by its endpoint ID alone. Every option is a flag and
 // an environment variable; the flag wins.
 //
@@ -105,6 +107,10 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 		return &cli.Float64Flag{Name: "min-dedup", EnvVars: []string{"JACCARD_MIN_DEDUP"}, Value: 0.5,
 			Usage: "upload a patch pack only against a base pack that holds at least this `FRACTION` of the reference's bytes"}
 	}
+	noIgnore := func() cli.Flag {
+		return &cli.BoolFlag{Name: "no-ignore", EnvVars: []string{"JACCARD_NO_IGNORE"},
+			Usage: "do not honor .amberignore files"}
+	}
 	tempDir := func() cli.Flag {
 		return &cli.StringFlag{Name: "temp-dir", EnvVars: []string{"JACCARD_TEMP_DIR"},
 			Usage: "`DIR`ectory the temporary store is made in and removed from (default: the system's temporary directory)"}
@@ -155,12 +161,29 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 				ArgsUsage: "DIR NAME",
 				Flags: []cli.Flag{
 					minDedup(),
-					&cli.BoolFlag{Name: "no-ignore", EnvVars: []string{"JACCARD_NO_IGNORE"},
-						Usage: "do not honor .amberignore files"},
+					noIgnore(),
 					tempDir(),
 					noProgress(),
 				},
 				Action: func(c *cli.Context) error { return runPushDir(c, connect) },
+			},
+			{
+				Name: "push-subdirs",
+				Usage: "push every directory in DIR as a reference of its own, named PREFIX and the directory's name, as push-dir does one: " +
+					"several at a time, and all of them even when some fail, which the command says at its end and fails for",
+				ArgsUsage: "DIR",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "prefix", EnvVars: []string{"JACCARD_PREFIX"},
+						Usage: "what the names of the references begin with: `PREFIX` is put before each directory's name as it is, " +
+							"so it wants its own / at the end (required)"},
+					&cli.IntFlag{Name: "jobs", Aliases: []string{"j"}, EnvVars: []string{"JACCARD_JOBS"}, Value: 5,
+						Usage: "`NUMBER` of directories pushed at once"},
+					minDedup(),
+					noIgnore(),
+					tempDir(),
+					noProgress(),
+				},
+				Action: func(c *cli.Context) error { return runPushSubdirs(c, connect) },
 			},
 			{
 				Name: "pull-dir",
