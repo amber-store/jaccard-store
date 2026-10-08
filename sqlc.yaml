@@ -1,0 +1,11 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    schema: "db/migrations"
+    queries: "db/queries"
+    gen:
+      go:
+        package: "dbq"
+        out: "db/dbq"
+        omit_sqlc_version: true
+        emit_empty_slices: true
