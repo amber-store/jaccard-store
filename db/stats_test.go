@@ -1,6 +1,9 @@
 package db
 
 import (
+	"database/sql"
+	"fmt"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"testing"
@@ -49,7 +52,9 @@ func TestStats(t *testing.T) {
 	if s, err := d.Stats(ctx); err != nil || s != (Stats{}) {
 		t.Fatalf("Stats of an empty store: %+v, %v", s, err)
 	}
-	figures(t, d)
+	_, _, _, roots := figures(t, d)
+	// What a root's key says its tree comes to when it is unpacked.
+	unpacked := func(i int) int64 { return int64(roots[i].Length()) }
 
 	got, err := d.Stats(ctx)
 	if err != nil {
@@ -57,13 +62,103 @@ func TestStats(t *testing.T) {
 	}
 	want := Stats{
 		Refs: 4, BasePacks: 2, PatchPacks: 1, Uploads: 1, Deletions: 6,
-		S3Bytes:      (100 + 60 + 20) + (10 + 104) + (200 + 148 + 30),
-		DataBytes:    100 + 10 + 200,
-		StoredBytes:  1000 + 50 + 3000,
-		LogicalBytes: 1000 + 2*(50+700) + 3000,
+		// Over refs: "a", "p" and "p2" on one pack, "b".
+		UnpackedBytes: unpacked(0) + 2*unpacked(1) + unpacked(2),
+		ObjectBytes:   1000 + 2*(50+700) + 3000,
+		// Over packs, each once.
+		PackBytes:  1000 + 50 + 3000,
+		DataBytes:  100 + 10 + 200,
+		IndexBytes: (60 + 20) + 104 + (148 + 30),
+		// Every pack has a ref.
+		ReferencedPackBytes: 1000 + 50 + 3000,
 	}
 	if got != want {
 		t.Fatalf("Stats = %+v, want %+v", got, want)
+	}
+	if want.UnpackedBytes == 0 {
+		t.Fatal("the roots of this test unpack to nothing: the figure is not tested")
+	}
+
+	// The ref of the base pack goes; the pack stays for the patch pack
+	// that leans on it, and is now what the sharing costs.
+	if err := d.DeleteRef(ctx, "a", later); err != nil {
+		t.Fatal(err)
+	}
+	want.Refs = 3
+	want.UnpackedBytes -= unpacked(0)
+	want.ObjectBytes -= 1000
+	want.UnreferencedPacks = 1
+	want.UnreferencedPackBytes, want.UnreferencedDataBytes = 1000, 100
+	want.ReferencedPackBytes = 50 + 3000
+	if got, err = d.Stats(ctx); err != nil || got != want {
+		t.Fatalf("Stats with a pack no ref points at = %+v, %v\nwant %+v", got, err, want)
+	}
+	// The parts are the whole.
+	if got.ReferencedPackBytes+got.UnreferencedPackBytes != got.PackBytes {
+		t.Fatalf("packs of %d and %d bytes make %d", got.ReferencedPackBytes, got.UnreferencedPackBytes, got.PackBytes)
+	}
+}
+
+// A database from before packs had an unpacked size gets one for every pack
+// when this release opens it, from the roots.
+func TestMigrationFillsTheUnpackedSizes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.sqlite")
+	// The store as the first release left it: its one migration applied,
+	// and packs written without the column.
+	first, err := embedded.ReadFile("migrations/0001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := sql.Open("sqlite", dataSourceName(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(string(first) + "; PRAGMA user_version = 1"); err != nil {
+		t.Fatal(err)
+	}
+	roots := testKeys(t, "root", 3)
+	for i, root := range roots {
+		if _, err := old.Exec(`INSERT INTO packs
+			(root, data_key, index_key, data_size, index_size, links_size, objects, bytes, shared_objects, shared_bytes, uploader, uploaded_at)
+			VALUES (?, ?, ?, 1, 1, 0, 1, 1, 0, 0, 'alice', 0)`, root[:], fmt.Sprint("d", i), fmt.Sprint("i", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := old.Exec("INSERT INTO refs (name, pack_id, updated_by, updated_at) VALUES ('one', 1, 'alice', 0), ('two', 3, 'alice', 0)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("opening the old store with this release: %v", err)
+	}
+	for _, root := range roots {
+		var unpacked int64
+		if err := d.writer.QueryRowContext(ctx, "SELECT unpacked FROM packs WHERE root = ?", root[:]).Scan(&unpacked); err != nil {
+			t.Fatal(err)
+		}
+		if unpacked != int64(root.Length()) || unpacked == 0 {
+			t.Errorf("the pack of %s unpacks to %d, its key says %d", root, unpacked, root.Length())
+		}
+	}
+	// And the figures of the store have them.
+	if s, err := d.Stats(ctx); err != nil || s.UnpackedBytes != int64(roots[0].Length()+roots[2].Length()) {
+		t.Fatalf("Stats = %+v, %v", s, err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Opened again there is nothing left to do, and it is as it was.
+	d, err = Open(path)
+	if err != nil {
+		t.Fatalf("opening it a second time: %v", err)
+	}
+	defer d.Close()
+	if s, err := d.Stats(ctx); err != nil || s.UnpackedBytes != int64(roots[0].Length()+roots[2].Length()) || s.Refs != 2 {
+		t.Fatalf("Stats after the second opening = %+v, %v", s, err)
 	}
 }
 
@@ -126,6 +221,53 @@ func TestListPacks(t *testing.T) {
 	got, err = d.ListPacks(ctx, b.ID, 10)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("after the last: %+v, %v", got, err)
+	}
+}
+
+func TestTopPacks(t *testing.T) {
+	d := open(t)
+	if byRefs, byChildren, err := d.TopPacks(ctx, 20); err != nil || len(byRefs) != 0 || len(byChildren) != 0 {
+		t.Fatalf("TopPacks of an empty store: %v, %v, %v", byRefs, byChildren, err)
+	}
+	a, p, b, roots := figures(t, d)
+	// A second patch pack on "a" that uses less of it than the first, and
+	// one on "b": "a" is leaned on twice, "b" once.
+	more := testKeys(t, "more", 2)
+	for i, on := range []int{0, 2} {
+		id := fmt.Sprint("more", i)
+		if _, err := d.CreateUpload(ctx, upload(id, id, more[i]), &roots[on]); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.CommitUpload(ctx, id, &Verified{IndexSize: 60, Objects: 1, Bytes: 10, SharedObjects: 1, SharedBytes: 300}, t0, later); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	byRefs, byChildren, err := d.TopPacks(ctx, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The patch pack has two refs; every other pack one, and among equals
+	// the older comes first.
+	if len(byRefs) != 5 || byRefs[0].Pack != p || byRefs[0].Refs != 2 || byRefs[0].ParentRoot == nil || *byRefs[0].ParentRoot != roots[0] ||
+		byRefs[1].Pack != a || byRefs[1].Refs != 1 || byRefs[1].Children != 2 || byRefs[1].LargestShare != 700 || byRefs[1].ParentRoot != nil ||
+		byRefs[2].Pack != b || byRefs[2].Children != 1 || byRefs[2].LargestShare != 300 {
+		t.Fatalf("by refs: %+v", byRefs)
+	}
+	// Leaned on: "a" by two, of which one uses 700 of its bytes and one
+	// 300; "b" by one. The patch packs are leaned on by none and not here.
+	if len(byChildren) != 2 || byChildren[0].Pack != a || byChildren[0].Children != 2 || byChildren[0].Refs != 1 || byChildren[0].LargestShare != 700 ||
+		byChildren[1].Pack != b || byChildren[1].Children != 1 || byChildren[1].LargestShare != 300 || byChildren[1].ParentRoot != nil {
+		t.Fatalf("by children: %+v", byChildren)
+	}
+
+	// A pack that lost its ref is still leaned on, and in that list alone.
+	if err := d.DeleteRef(ctx, "a", later); err != nil {
+		t.Fatal(err)
+	}
+	byRefs, byChildren, err = d.TopPacks(ctx, 1)
+	if err != nil || len(byRefs) != 1 || byRefs[0].Pack != p || len(byChildren) != 1 || byChildren[0].Pack != a || byChildren[0].Refs != 0 {
+		t.Fatalf("the first of each after the ref went: %+v, %+v, %v", byRefs, byChildren, err)
 	}
 }
 

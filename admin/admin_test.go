@@ -116,13 +116,19 @@ func TestStats(t *testing.T) {
 	var got map[string]float64
 	header := s.get(t, "/api/stats", http.StatusOK, &got)
 	want := map[string]float64{
-		"refs": 3, "base_packs": 1, "patch_packs": 1, "uploads": 1, "deletions": 0,
-		"s3_bytes":      400 + 456 + 100 + 120 + 148,
-		"data_bytes":    400 + 120,
-		"stored_bytes":  1000 + 300,
-		"logical_bytes": 1000 + 1000 + 1000, // base; patch and alias, each the patch pack plus what its parent holds
-		"dedup_rate":    1 - 1300.0/3000.0,
-		"compression":   520.0 / 1300.0,
+		"refs": 3, "base_packs": 1, "patch_packs": 1, "unreferenced_packs": 0, "uploads": 1, "deletions": 0,
+		// The chain: every reference unpacked; as its distinct objects;
+		// the packs there are; their data in the bucket; all of the bucket.
+		"unpacked_bytes": float64(s.base.Length() + 2*s.patch.Length()), // "base", and "patch" and "alias" on one pack
+		"object_bytes":   1000 + 1000 + 1000,                            // each of the three: the patch pack and what its parent holds
+		"pack_bytes":     1000 + 300,
+		"data_bytes":     400 + 120,
+		"index_bytes":    456 + 100 + 148,
+		"s3_bytes":       400 + 456 + 100 + 120 + 148,
+		// Both packs have a reference.
+		"referenced_pack_bytes":   1000 + 300,
+		"unreferenced_pack_bytes": 0,
+		"unreferenced_data_bytes": 0,
 	}
 	for name, w := range want {
 		if g, ok := got[name]; !ok || !near(g, w) {
@@ -168,11 +174,14 @@ type refsPage struct {
 		UpdatedBy                string  `json:"updated_by"`
 		UpdatedAt                string  `json:"updated_at"`
 		Kind                     string  `json:"kind"`
+		UnpackedBytes            int64   `json:"unpacked_bytes"`
 		RefObjects               int64   `json:"ref_objects"`
 		RefBytes                 int64   `json:"ref_bytes"`
+		PackObjects              int64   `json:"pack_objects"`
+		PackBytes                int64   `json:"pack_bytes"`
+		PackDataSize             int64   `json:"pack_data_size"`
 		SharedObjects            int64   `json:"shared_objects"`
 		SharedBytes              int64   `json:"shared_bytes"`
-		Dedup                    float64 `json:"dedup"`
 		ParentRoot               *string `json:"parent_root"`
 		ParentUnreachableObjects int64   `json:"parent_unreachable_objects"`
 		ParentUnreachableBytes   int64   `json:"parent_unreachable_bytes"`
@@ -193,9 +202,13 @@ func TestRefs(t *testing.T) {
 	}
 
 	if base.Kind != "base" || base.Root != s.base.String() || base.ParentRoot != nil ||
-		base.RefObjects != 10 || base.RefBytes != 1000 || base.SharedBytes != 0 || base.Dedup != 0 ||
+		base.RefObjects != 10 || base.RefBytes != 1000 || base.SharedBytes != 0 ||
 		base.ParentUnreachableObjects != 0 || base.ParentUnreachableBytes != 0 {
 		t.Errorf("base ref: %+v", base)
+	}
+	// A base pack holds all of its reference: the pack is the objects.
+	if base.UnpackedBytes != int64(s.base.Length()) || base.PackObjects != 10 || base.PackBytes != 1000 || base.PackDataSize != 400 {
+		t.Errorf("base ref sizes: %+v", base)
 	}
 	if base.UpdatedBy != "alice" || base.UpdatedAt != "2027-01-15T08:00:00Z" {
 		t.Errorf("base ref updated by %q at %q", base.UpdatedBy, base.UpdatedAt)
@@ -204,8 +217,12 @@ func TestRefs(t *testing.T) {
 	if patch.Kind != "patch" || patch.Root != s.patch.String() || patch.ParentRoot == nil || *patch.ParentRoot != s.base.String() {
 		t.Fatalf("patch ref: %+v", patch)
 	}
-	if patch.RefObjects != 9 || patch.RefBytes != 1000 || patch.SharedObjects != 6 || patch.SharedBytes != 700 || !near(patch.Dedup, 0.7) {
+	if patch.RefObjects != 9 || patch.RefBytes != 1000 || patch.SharedObjects != 6 || patch.SharedBytes != 700 {
 		t.Errorf("patch ref measures: %+v", patch)
+	}
+	// A patch pack holds what its parent lacks, and the rest is shared.
+	if patch.UnpackedBytes != int64(s.patch.Length()) || patch.PackObjects != 3 || patch.PackBytes != 300 || patch.PackDataSize != 120 {
+		t.Errorf("patch ref sizes: %+v", patch)
 	}
 	// The base pack holds 10 objects and 1000 bytes; the ref reaches 6 and 700 of them.
 	if patch.ParentUnreachableObjects != 4 || patch.ParentUnreachableBytes != 300 {
@@ -246,6 +263,7 @@ type packJSON struct {
 	Root          string  `json:"root"`
 	Kind          string  `json:"kind"`
 	ParentRoot    *string `json:"parent_root"`
+	UnpackedBytes int64   `json:"unpacked_bytes"`
 	Objects       int64   `json:"objects"`
 	Bytes         int64   `json:"bytes"`
 	DataSize      int64   `json:"data_size"`
@@ -273,7 +291,8 @@ func TestPacks(t *testing.T) {
 	}
 	base, patch := page.Packs[0], page.Packs[1]
 	want := packJSON{
-		ID: base.ID, Root: s.base.String(), Kind: "base", Objects: 10, Bytes: 1000, DataSize: 400, IndexSize: 456,
+		ID: base.ID, Root: s.base.String(), Kind: "base", UnpackedBytes: int64(s.base.Length()),
+		Objects: 10, Bytes: 1000, DataSize: 400, IndexSize: 456,
 		LinksSize: 100, Uploader: "alice", UploadedAt: "2027-01-15T08:00:00Z", Refs: 1, Children: 1,
 	}
 	if base != want {
@@ -324,6 +343,58 @@ func TestPackDetail(t *testing.T) {
 	s.get(t, "/api/packs/"+s.open.String(), http.StatusNotFound, nil)
 	s.get(t, "/api/packs/not-hex", http.StatusBadRequest, nil)
 	s.get(t, "/api/packs/abcd", http.StatusBadRequest, nil)
+}
+
+func TestTop(t *testing.T) {
+	s := newStore(t)
+	type topPack struct {
+		packJSON
+		LargestShare int64 `json:"largest_share"`
+	}
+	var got struct {
+		ByRefs     []topPack `json:"by_refs"`
+		ByChildren []topPack `json:"by_children"`
+	}
+	s.get(t, "/api/top", http.StatusOK, &got)
+	// The patch pack is under "patch" and "alias"; the base pack under
+	// "base", and the patch pack leans on it and uses 700 of its bytes.
+	if len(got.ByRefs) != 2 || got.ByRefs[0].Root != s.patch.String() || got.ByRefs[0].Refs != 2 || got.ByRefs[0].Kind != "patch" ||
+		got.ByRefs[0].ParentRoot == nil || *got.ByRefs[0].ParentRoot != s.base.String() ||
+		got.ByRefs[1].Root != s.base.String() || got.ByRefs[1].Refs != 1 {
+		t.Errorf("by refs: %+v", got.ByRefs)
+	}
+	if len(got.ByChildren) != 1 || got.ByChildren[0].Root != s.base.String() || got.ByChildren[0].Children != 1 ||
+		got.ByChildren[0].LargestShare != 700 || got.ByChildren[0].Bytes != 1000 || got.ByChildren[0].UnpackedBytes != int64(s.base.Length()) {
+		t.Errorf("by children: %+v", got.ByChildren)
+	}
+
+	s.get(t, "/api/top?limit=1", http.StatusOK, &got)
+	if len(got.ByRefs) != 1 || got.ByRefs[0].Root != s.patch.String() || len(got.ByChildren) != 1 {
+		t.Errorf("the first of each: %+v", got)
+	}
+	for _, q := range []string{"limit=0", "limit=-3", "limit=many"} {
+		s.get(t, "/api/top?"+q, http.StatusBadRequest, nil)
+	}
+}
+
+func TestTopOfAnEmptyStore(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "store.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	srv := httptest.NewServer(admin.Handler(d))
+	defer srv.Close()
+	res, err := http.Get(srv.URL + "/api/top")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(res.Body)
+	// Lists, not nothing: the page goes through them.
+	if got := strings.TrimSpace(string(body)); got != `{"by_children":[],"by_refs":[]}` {
+		t.Errorf("the top of an empty store: %s", got)
+	}
 }
 
 func TestUploads(t *testing.T) {

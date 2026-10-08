@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -149,6 +150,54 @@ func prepare(ctx context.Context, pool *sql.DB) error {
 	return migrate(ctx, pool)
 }
 
+// steps are what a migration does that SQL cannot: a step runs in the
+// migration's transaction, after its file.
+var steps = map[string]func(context.Context, *sql.Tx) error{
+	"migrations/0002_unpacked.sql": fillUnpacked,
+}
+
+// unpackedOf is what the tree of root comes to when it is unpacked: the
+// length field of the key, which for a directory or a commit is the size of
+// everything under it, and for a file's content the size of the file.
+func unpackedOf(root key.Key) int64 {
+	return int64(min(root.Length(), math.MaxInt64))
+}
+
+// fillUnpacked gives every pack the unpacked size of its root: the packs
+// that were there before the column was.
+func fillUnpacked(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, "SELECT id, root FROM packs")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	sizes := map[int64]int64{}
+	for rows.Next() {
+		var id int64
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			return err
+		}
+		root, err := keyOf(raw)
+		if err != nil {
+			return fmt.Errorf("pack %d: %w", id, err)
+		}
+		sizes[id] = unpackedOf(root)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// The rows are read to their end before any is written: the transaction
+	// has one connection.
+	rows.Close()
+	for id, size := range sizes {
+		if _, err := tx.ExecContext(ctx, "UPDATE packs SET unpacked = ? WHERE id = ?", size, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // migrate applies, in one transaction, the migrations the database has not
 // seen. They are the files of migrations/ in the order of their names;
 // PRAGMA user_version records how many have been applied.
@@ -180,6 +229,11 @@ func migrate(ctx context.Context, pool *sql.DB) error {
 		}
 		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
 			return fmt.Errorf("migration %s: %w", name, err)
+		}
+		if step := steps[name]; step != nil {
+			if err := step(ctx, tx); err != nil {
+				return fmt.Errorf("migration %s: %w", name, err)
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", len(names))); err != nil {

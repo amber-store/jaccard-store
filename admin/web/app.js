@@ -98,25 +98,134 @@ function paged(columns, load, cursor, empty) {
   return { holder, next };
 }
 
+// saved says what one size of the chain is against the one before it: how
+// much less, and what part of the one before that is. A step can also cost,
+// when what it adds is more than what it takes away.
+function saved(before, after) {
+  if (!before) return "–";
+  const less = before - after;
+  if (less >= 0) return [bytes(less), " less", h("div", { class: "sub" }, percent(less / before))];
+  return h("span", { class: "cost" }, bytes(-less), " more", h("div", { class: "sub" }, percent(-less / before)));
+}
+
+// link is one size of the chain: what it is, the size, a bar of it against
+// the largest, and what the step to it saved.
+function link(most, { title, note, size, against, part, total }) {
+  return h("tr", { class: part ? "part" : total && "total" },
+    h("th", { scope: "row" }, title, note && h("div", { class: "sub" }, note)),
+    h("td", { class: "num" }, bytes(size)),
+    h("td", { class: "bar" }, !part && h("meter", { min: 0, max: Math.max(most, 1), value: size })),
+    h("td", { class: "num" }, against));
+}
+
+// plural counts things in words: 1 pack, 2 packs.
+const plural = (n, one, many) => `${count(n)} ${n === 1 ? one : many}`;
+
+// topColumns are the columns the two lists of packs on the overview share,
+// around the one count each is ordered by.
+function topColumns(first, second) {
+  return [
+    { title: "Root", cell: (p) => keyLink(p.root) },
+    { title: "Kind", cell: (p) => kindBadge(p.kind) },
+    first,
+    second,
+    { title: "Unpacked", num: true, cell: (p) => bytes(p.unpacked_bytes) },
+    { title: "In the pack", num: true, cell: (p) => [bytes(p.bytes), h("div", { class: "sub" }, plural(p.objects, "object", "objects"))] },
+    { title: "In the bucket", num: true, cell: (p) => bytes(p.data_size + p.index_size + p.links_size) },
+  ];
+}
+
 async function overview() {
-  const s = await api("api/stats");
+  const [s, top] = await Promise.all([api("api/stats"), api("api/top?limit=20")]);
+  const most = Math.max(s.unpacked_bytes, s.object_bytes, s.pack_bytes, s.s3_bytes);
+  const waiting = [
+    s.deletions > 0 && `${plural(s.deletions, "object", "objects")} queued for deletion`,
+    s.uploads > 0 && plural(s.uploads, "open upload", "open uploads"),
+  ].filter(Boolean);
   return [
     h("h1", null, "Overview"),
+    h("h2", null, "From unpacked to the bucket"),
+    h("p", { class: "lede" },
+      "What the references of this store come to. Each line is the one above it after one more thing the store does to save room."),
+    h("div", { class: "scroll" },
+      h("table", { class: "chain" },
+        h("thead", null, h("tr", null,
+          h("th", { scope: "col" }, "The references, as"),
+          h("th", { class: "num", scope: "col" }, "Size"),
+          h("th", { scope: "col" }),
+          h("th", { class: "num", scope: "col" }, "Against the line above"))),
+        h("tbody", null,
+          link(most, {
+            title: "Unpacked",
+            note: "every reference in a directory of its own: its files and its directories",
+            size: s.unpacked_bytes, against: "–",
+          }),
+          link(most, {
+            title: "One pack for each reference",
+            note: "content addressing: within a reference every object is there once",
+            size: s.object_bytes, against: saved(s.unpacked_bytes, s.object_bytes),
+          }),
+          link(most, {
+            title: "The packs there are",
+            note: "sharing: a patch pack leans on a base pack, and references of the same content are one pack",
+            size: s.pack_bytes, against: saved(s.object_bytes, s.pack_bytes),
+          }),
+          link(most, {
+            part: true,
+            title: "in packs that references point at",
+            note: "what sharing saves",
+            size: s.referenced_pack_bytes, against: saved(s.object_bytes, s.referenced_pack_bytes),
+          }),
+          link(most, {
+            part: true,
+            title: s.unreferenced_packs
+              ? `in ${plural(s.unreferenced_packs, "pack", "packs")} no reference points at`
+              : "in packs no reference points at: there is none",
+            note: "what sharing costs: such a pack is kept whole for the patch packs that lean on it",
+            size: s.unreferenced_pack_bytes,
+            against: s.unreferenced_pack_bytes ? [bytes(s.unreferenced_data_bytes), h("div", { class: "sub" }, "of the bucket")] : "–",
+          }),
+          link(most, {
+            title: "Pack data in the bucket",
+            note: "compression",
+            size: s.data_bytes, against: saved(s.pack_bytes, s.data_bytes),
+          }),
+          link(most, {
+            part: true,
+            title: "indexes and links beside it",
+            size: s.index_bytes, against: "–",
+          }),
+          link(most, {
+            total: true,
+            title: "In the bucket",
+            size: s.s3_bytes,
+            against: s.unpacked_bytes ? [percent(s.s3_bytes / s.unpacked_bytes), h("div", { class: "sub" }, "of unpacked")] : "–",
+          })))),
+    h("p", { class: "footnote" },
+      "Sizes are of objects as they are, before compression, down to the packs there are. ",
+      "Unpacked is the size the root key of a reference records for its tree; the server takes the key's word for it. ",
+      waiting.length > 0 && `Not counted: ${waiting.join(" and ")}, which are in the bucket as well.`),
+    h("h2", null, "Counts"),
     h("div", { class: "tiles" },
       tile("References", count(s.refs)),
-      tile("Base packs", count(s.base_packs)),
-      tile("Patch packs", count(s.patch_packs)),
+      tile("Base packs", count(s.base_packs), "each holds all of one root"),
+      tile("Patch packs", count(s.patch_packs), "each holds what its parent lacks"),
+      tile("Packs without a reference", count(s.unreferenced_packs), "kept for the patch packs that lean on them"),
       tile("Open uploads", count(s.uploads)),
       tile("Queued deletions", count(s.deletions), "objects waiting to leave the bucket")),
-    h("h2", null, "Size"),
-    h("div", { class: "tiles" },
-      tile("In the bucket", bytes(s.s3_bytes), "data, indexes and links"),
-      tile("Stored objects", bytes(s.stored_bytes), "uncompressed, each pack counted once"),
-      tile("Referenced", bytes(s.logical_bytes), "what the references hold, each taken alone")),
-    h("h2", null, "Rates"),
-    h("div", { class: "tiles" },
-      tile("Deduplication", percent(s.dedup_rate), "of the referenced bytes are not stored twice", s.dedup_rate),
-      tile("Compression", s.stored_bytes ? percent(s.compression) : "–", "compressed data over stored objects", s.compression)),
+    h("h2", null, "Packs the most references point at"),
+    table(topColumns(
+      { title: "References", num: true, cell: (p) => count(p.refs) },
+      { title: "Patch packs on it", num: true, cell: (p) => count(p.children) },
+    ), top.by_refs, "The store holds no references yet."),
+    h("h2", null, "Packs the most patch packs lean on"),
+    table(topColumns(
+      { title: "Patch packs on it", num: true, cell: (p) => count(p.children) },
+      { title: "References", num: true, cell: (p) => count(p.refs) },
+    ).concat([
+      { title: "The most one of them uses", num: true, cell: (p) =>
+          [bytes(p.largest_share), h("div", { class: "sub" }, p.bytes ? `${percent(p.largest_share / p.bytes)} of the pack` : "")] },
+    ]), top.by_children, "No pack is leaned on: every reference has a base pack of its own."),
   ];
 }
 
@@ -125,12 +234,18 @@ async function refs() {
   const columns = [
     { title: "Name", class: "name", cell: (r) => r.name },
     { title: "Pack", cell: (r) => [kindBadge(r.kind), " ", keyLink(r.root)] },
-    { title: "Objects", num: true, cell: (r) => count(r.ref_objects) },
-    { title: "Size", num: true, cell: (r) => bytes(r.ref_bytes) },
-    { title: "Deduplicated", num: true, cell: (r) => r.kind === "patch"
-        ? [bytes(r.shared_bytes), h("div", { class: "sub" }, percent(r.dedup))] : "–" },
-    { title: "Parent, out of reach", num: true, cell: (r) => r.parent_root
-        ? [bytes(r.parent_unreachable_bytes), h("div", { class: "sub" }, `${count(r.parent_unreachable_objects)} objects`)] : "–" },
+    { title: "Unpacked", num: true, cell: (r) => bytes(r.unpacked_bytes) },
+    { title: "As objects", num: true, cell: (r) =>
+        [bytes(r.ref_bytes), h("div", { class: "sub" }, plural(r.ref_objects, "object", "objects"))] },
+    { title: "In its own pack", num: true, cell: (r) =>
+        [bytes(r.pack_bytes), h("div", { class: "sub" }, `${bytes(r.pack_data_size)} in the bucket`)] },
+    { title: "From its parent", num: true, cell: (r) => r.parent_root
+        ? [bytes(r.shared_bytes), h("div", { class: "sub" }, r.ref_bytes ? `${percent(r.shared_bytes / r.ref_bytes)} of the reference` : "")] : "–" },
+    { title: "Of the parent, unused", num: true, cell: (r) => {
+        if (!r.parent_root) return "–";
+        const parent = r.shared_bytes + r.parent_unreachable_bytes;
+        return [bytes(r.parent_unreachable_bytes), h("div", { class: "sub" }, parent ? `${percent(r.parent_unreachable_bytes / parent)} of the parent` : "")];
+      } },
     { title: "Updated", cell: (r) => [when(r.updated_at), h("div", { class: "sub key", title: r.updated_by }, short(r.updated_by))] },
   ];
   const body = h("div");
@@ -161,11 +276,11 @@ async function packs() {
   const columns = [
     { title: "Root", cell: (p) => keyLink(p.root) },
     { title: "Kind", cell: (p) => kindBadge(p.kind) },
-    { title: "Objects", num: true, cell: (p) => count(p.objects) },
-    { title: "Stored", num: true, cell: (p) => bytes(p.bytes) },
+    { title: "Unpacked", num: true, cell: (p) => bytes(p.unpacked_bytes) },
+    { title: "In the pack", num: true, cell: (p) => [bytes(p.bytes), h("div", { class: "sub" }, plural(p.objects, "object", "objects"))] },
     { title: "In the bucket", num: true, cell: (p) => bytes(p.data_size + p.index_size + p.links_size) },
-    { title: "Refs", num: true, cell: (p) => count(p.refs) },
-    { title: "Children", num: true, cell: (p) => count(p.children) },
+    { title: "References", num: true, cell: (p) => p.refs ? count(p.refs) : h("span", { class: "cost" }, "none") },
+    { title: "Patch packs on it", num: true, cell: (p) => count(p.children) },
     { title: "Uploaded by", cell: (p) => h("span", { class: "key", title: p.uploader }, short(p.uploader)) },
     { title: "Uploaded", cell: (p) => when(p.uploaded_at) },
   ];
@@ -190,17 +305,20 @@ async function pack(root) {
     fact("Kind", kindBadge(p.kind)),
     fact("Uploaded by", h("span", { class: "key full" }, p.uploader)),
     fact("Uploaded", when(p.uploaded_at)),
-    fact("Objects in the pack", `${count(p.objects)}, ${bytes(p.bytes)} uncompressed`),
+    fact("Unpacked", bytes(p.unpacked_bytes), " is what the tree of this root comes to, by its key"),
+    fact("In the pack", `${plural(p.objects, "object", "objects")}, ${bytes(p.bytes)} before compression`),
     fact("In the bucket", `${bytes(p.data_size)} data, ${bytes(p.index_size)} index`,
       p.links_size ? `, ${bytes(p.links_size)} links` : ""),
   ];
   if (d.parent) {
     const refBytes = p.bytes + p.shared_bytes;
+    const unused = d.parent.bytes - p.shared_bytes;
     facts.push(
       fact("Parent", keyLink(d.parent.root)),
-      fact("Held by the parent", `${count(p.shared_objects)} objects, ${bytes(p.shared_bytes)}`,
+      fact("From the parent", `${plural(p.shared_objects, "object", "objects")}, ${bytes(p.shared_bytes)}`,
         refBytes ? ` (${percent(p.shared_bytes / refBytes)} of the reference)` : ""),
-      fact("Parent, out of reach", `${count(d.parent.objects - p.shared_objects)} objects, ${bytes(d.parent.bytes - p.shared_bytes)}`));
+      fact("Of the parent, unused", `${plural(d.parent.objects - p.shared_objects, "object", "objects")}, ${bytes(unused)}`,
+        d.parent.bytes ? ` (${percent(unused / d.parent.bytes)} of the parent)` : ""));
   }
   return [
     h("h1", null, "Pack"),

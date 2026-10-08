@@ -451,39 +451,85 @@ elsewhere cannot read the API by pointing its own name at 127.0.0.1.
 
 ## 8. Statistics and the admin page
 
-All of it is computed by the server from what it verified. Per pack, and so
-per ref pointing at it:
+The figures answer four questions about the store, in this order: what
+would the references take unpacked; what does content addressing save;
+what does sharing packs between references save; what does compression
+save. They are one chain of sizes, each what the one before comes to after
+one more saving:
 
-| figure | from |
-| --- | --- |
-| objects, bytes of the ref | `objects + shared_objects`, `bytes + shared_bytes` |
-| deduplicated | `shared_bytes` of the ref's bytes |
-| parent objects, bytes the ref cannot reach | parent's `objects - shared_objects`, `bytes - shared_bytes` |
+| size | what it is | from |
+| --- | --- | --- |
+| unpacked | every ref in a directory of its own | over refs: `unpacked` of its pack |
+| one pack per ref | each ref as its distinct objects, uncompressed | over refs: `bytes + shared_bytes` of its pack |
+| the packs there are | their objects, uncompressed | over packs: `bytes` |
+| pack data in S3 | compressed | over packs: `data_size` |
+| in S3 | with indexes and links | over packs: `data_size + index_size + links_size` |
 
-For the store:
+The first two are sums over refs, so a pack that two refs point at counts
+twice: two directories would hold its content twice, and one pack for each
+ref would be two packs.
 
-- refs, base packs, patch packs, open uploads, queued deletions;
-- bytes in S3: the sum of `data_size + index_size + links_size`;
-- stored bytes: the sum of `bytes` over packs;
-- logical bytes: the sum over refs of the bytes of the ref;
-- deduplication rate: 1 − stored / logical;
-- compression: S3 data bytes / stored bytes.
+**Unpacked** is the length field of the root key. For a directory and a
+commit that is the size of everything under it, file contents and directory
+records; for a single file, its content. It is stored per pack (`unpacked`,
+migration 2, filled for the packs that were there from their roots) so that
+the sum is one query. It is the one figure that is not the server's own:
+`verify` checks a directory against its key by hash, and the length field
+is not part of what is hashed. It is what whoever built the tree says.
+Measured against the sum of file sizes it is 0.5% more on a tree of 211 MB
+in 9,329 files, and 14% more on one of 8 files, where the directory records
+weigh the most.
+
+**The step from one pack per ref to the packs there are can cost.** A
+patch pack saves its ref the objects the parent holds, and refs on one
+pack share it; but a pack no ref points at, kept because patch packs lean
+on it, is all there whatever part of it they use. So the third size is
+given in its two parts:
+
+- in packs a ref points at: never more than one pack per ref, and the
+  difference is what sharing saves;
+- in packs no ref points at, with their count and their bytes in S3: what
+  sharing costs.
+
+A single ratio of the two, which this section used to define as the
+deduplication rate, adds a saving to a cost and can be negative. It is
+gone.
+
+**Not counted:** objects queued for deletion and open uploads are in the
+bucket and in none of the sizes; the server does not record what they
+weigh. Their counts are shown.
+
+Per ref, the same sizes for itself: unpacked; as objects (`objects +
+shared_objects`, `bytes + shared_bytes`); in its own pack (`objects`,
+`bytes`, and `data_size` in S3); from its parent (`shared_objects`,
+`shared_bytes`); and of the parent, unused (the parent's `objects -
+shared_objects`, `bytes - shared_bytes`).
+
+Two lists of at most twenty packs, the most first and among equals the
+older: those the most refs point at, and those the most patch packs lean
+on. Each has, beside the pack's figures, both counts and the most of the
+pack's bytes that one of the patch packs leaning on it uses (the largest
+`shared_bytes` among them): against the pack's own bytes it says what a
+pull of such a patch pack fetches for nothing.
 
 The admin listener serves a read-only JSON API and the page, on
 `127.0.0.1:8080` unless told otherwise. It has no authentication; it is
 bound to loopback for that reason.
 
 ```
-GET /api/stats
+GET /api/stats               the chain of sizes, its two parts, the counts
 GET /api/refs?prefix=&after=&limit=
 GET /api/packs?after=&limit=
 GET /api/packs/{root}        the pack, its refs, its children, its parent
+GET /api/top?limit=          the two lists of packs, 20 of each by default
 GET /api/uploads
 ```
 
 The page is plain HTML, CSS and JavaScript with no build step, embedded with
-`go:embed`: an overview, the refs, the packs with a detail view (uploader,
-time, sizes, parent, children, refs), and the open uploads.
+`go:embed`: an overview (the chain with a bar for every size and what each
+step saves or costs against the one before, the counts, the two lists), the
+refs, the packs with a detail view (uploader, time, sizes, parent, children,
+refs), and the open uploads.
 
 ## 9. Client
 
@@ -831,7 +877,12 @@ Tests are written before the code they cover.
   clients pushing one root at once; a pull that skips the parent; a small
   reference that is not hung on a large pack, and its next version, which
   leans on the small pack instead.
-- `admin`: the API through `httptest`.
+- `admin`: the API through `httptest`. The page has no tests of its own:
+  after a change it is looked at in a browser, over a store with patch
+  packs, refs that share a pack and a pack no ref points at.
+- `db`: the sizes of the chain over a store with all of those, and a
+  database as the first release left it, which gets the unpacked size of
+  every pack when this release opens it.
 - The command: its flags and variables against a server that records what
   it is asked, the patterns of `ls` and `rm` among them (each kind of
   pattern, a star across slashes, several arguments, one that matches

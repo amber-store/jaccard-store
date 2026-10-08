@@ -88,13 +88,14 @@ const insertPack = `-- name: InsertPack :one
 INSERT INTO packs (
     root, parent_id, data_key, index_key, links_key, data_size, index_size,
     links_size, objects, bytes, shared_objects, shared_bytes, uploader,
-    uploaded_at, sketch
+    uploaded_at, sketch, unpacked
 ) VALUES (
     ?1, ?2, ?3,
     ?4, ?5, ?6,
     ?7, ?8, ?9,
     ?10, ?11, ?12,
-    ?13, ?14, ?15
+    ?13, ?14, ?15,
+    ?16
 )
 RETURNING id
 `
@@ -115,6 +116,7 @@ type InsertPackParams struct {
 	Uploader      string
 	UploadedAt    int64
 	Sketch        []byte
+	Unpacked      int64
 }
 
 // The reads of a pack leave its sketch out: it is some kilobytes, and only
@@ -136,6 +138,7 @@ func (q *Queries) InsertPack(ctx context.Context, arg InsertPackParams) (int64, 
 		arg.Uploader,
 		arg.UploadedAt,
 		arg.Sketch,
+		arg.Unpacked,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -382,6 +385,169 @@ func (q *Queries) SharingPacks(ctx context.Context, keys [][]byte) ([]SharingPac
 			&i.Root,
 			&i.Sketch,
 			&i.Shared,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const topPacksByChildren = `-- name: TopPacksByChildren :many
+SELECT p.id, p.root, p.parent_id, p.data_key, p.index_key, p.links_key,
+       p.data_size, p.index_size, p.links_size, p.objects, p.bytes,
+       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at,
+       (SELECT count(*) FROM refs AS r WHERE r.pack_id = p.id) AS refs,
+       count(*) AS children,
+       CAST(max(c.shared_bytes) AS INTEGER) AS largest_share
+FROM packs AS c
+JOIN packs AS p ON p.id = c.parent_id
+GROUP BY p.id
+ORDER BY count(*) DESC, p.id
+LIMIT ?1
+`
+
+type TopPacksByChildrenRow struct {
+	ID            int64
+	Root          []byte
+	ParentID      sql.NullInt64
+	DataKey       string
+	IndexKey      string
+	LinksKey      sql.NullString
+	DataSize      int64
+	IndexSize     int64
+	LinksSize     int64
+	Objects       int64
+	Bytes         int64
+	SharedObjects int64
+	SharedBytes   int64
+	Uploader      string
+	UploadedAt    int64
+	Refs          int64
+	Children      int64
+	LargestShare  int64
+}
+
+// The packs the most patch packs lean on, the most first and among equals
+// the older. Only a base pack is leaned on, so none of them has a parent.
+func (q *Queries) TopPacksByChildren(ctx context.Context, n int64) ([]TopPacksByChildrenRow, error) {
+	rows, err := q.db.QueryContext(ctx, topPacksByChildren, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TopPacksByChildrenRow{}
+	for rows.Next() {
+		var i TopPacksByChildrenRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Root,
+			&i.ParentID,
+			&i.DataKey,
+			&i.IndexKey,
+			&i.LinksKey,
+			&i.DataSize,
+			&i.IndexSize,
+			&i.LinksSize,
+			&i.Objects,
+			&i.Bytes,
+			&i.SharedObjects,
+			&i.SharedBytes,
+			&i.Uploader,
+			&i.UploadedAt,
+			&i.Refs,
+			&i.Children,
+			&i.LargestShare,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const topPacksByRefs = `-- name: TopPacksByRefs :many
+SELECT p.id, p.root, p.parent_id, p.data_key, p.index_key, p.links_key,
+       p.data_size, p.index_size, p.links_size, p.objects, p.bytes,
+       p.shared_objects, p.shared_bytes, p.uploader, p.uploaded_at,
+       parent.root AS parent_root,
+       count(*) AS refs,
+       (SELECT count(*) FROM packs AS c WHERE c.parent_id = p.id) AS children,
+       CAST((SELECT COALESCE(max(c.shared_bytes), 0) FROM packs AS c WHERE c.parent_id = p.id) AS INTEGER) AS largest_share
+FROM refs AS r
+JOIN packs AS p ON p.id = r.pack_id
+LEFT JOIN packs AS parent ON parent.id = p.parent_id
+GROUP BY p.id
+ORDER BY count(*) DESC, p.id
+LIMIT ?1
+`
+
+type TopPacksByRefsRow struct {
+	ID            int64
+	Root          []byte
+	ParentID      sql.NullInt64
+	DataKey       string
+	IndexKey      string
+	LinksKey      sql.NullString
+	DataSize      int64
+	IndexSize     int64
+	LinksSize     int64
+	Objects       int64
+	Bytes         int64
+	SharedObjects int64
+	SharedBytes   int64
+	Uploader      string
+	UploadedAt    int64
+	ParentRoot    []byte
+	Refs          int64
+	Children      int64
+	LargestShare  int64
+}
+
+// The packs the most refs point at, the most first and among equals the
+// older. largest_share is the most of a pack's bytes that one of the patch
+// packs leaning on it uses, 0 when none leans on it.
+func (q *Queries) TopPacksByRefs(ctx context.Context, n int64) ([]TopPacksByRefsRow, error) {
+	rows, err := q.db.QueryContext(ctx, topPacksByRefs, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TopPacksByRefsRow{}
+	for rows.Next() {
+		var i TopPacksByRefsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Root,
+			&i.ParentID,
+			&i.DataKey,
+			&i.IndexKey,
+			&i.LinksKey,
+			&i.DataSize,
+			&i.IndexSize,
+			&i.LinksSize,
+			&i.Objects,
+			&i.Bytes,
+			&i.SharedObjects,
+			&i.SharedBytes,
+			&i.Uploader,
+			&i.UploadedAt,
+			&i.ParentRoot,
+			&i.Refs,
+			&i.Children,
+			&i.LargestShare,
 		); err != nil {
 			return nil, err
 		}
