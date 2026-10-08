@@ -144,7 +144,19 @@ jaccard-store push snap                  # or: push --as releases/1.0 snap
 jaccard-store ls
 jaccard-store pull --as copy releases/1.0
 jaccard-store rm releases/1.0
+jaccard-store rm 'nightly/*' 'v0.[1-3].?'  # patterns, quoted from the shell
 ```
+
+`rm` takes one or more patterns and removes every reference one of them
+matches, printing each as `ls` would. A pattern is a name, or one with `*`
+(any run of characters), `?` (any one), `[a-c]` or `[^a-c]` (one of these,
+or one but these) and `\` before a character that is meant as itself. A
+slash is a character like any other, as it is to the prefix of `ls`:
+`nightly/*` is everything under `nightly/`, however deep.
+
+Everything is looked up before anything is removed. An argument that
+matches nothing, or is no pattern, ends the command with nothing removed:
+a mistyped argument does not take the half that was spelled right.
 
 A directory goes to the server and comes back without a store of your own:
 
