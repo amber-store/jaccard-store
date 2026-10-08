@@ -38,3 +38,6 @@ output/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# nix build
+result

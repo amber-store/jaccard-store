@@ -123,9 +123,27 @@ already has the parent's content never downloads it again.
 
 ## Development
 
+The Nix build is [gonixgo](https://github.com/draganm/gonixgo)'s: one
+derivation per Go package, and no Nix file to update when `go.mod` changes.
+gonixgo runs a program while Nix evaluates, which Nix allows only when
+asked, so every command that touches the flake's package takes an option.
+The dev shell carries the built commands and needs it too:
+
 ```sh
-nix develop -c go test ./...
-nix develop -c sh -c 'cd db && go generate'   # after changing db/queries or db/migrations
+nix build --option allow-unsafe-native-code-during-evaluation true
+./result/bin/jaccard-stored --help
+
+nix develop --option allow-unsafe-native-code-during-evaluation true
+```
+
+In the dev shell are `go`, `sqlc`, and `jaccard-stored` and `jaccard-store`
+as built from the tree. With direnv, `.envrc` passes the option and reloads
+the shell, rebuilding the two commands, when the sources change. Nix sees
+only the files git tracks, so `git add` new ones.
+
+```sh
+go test ./...
+(cd db && go generate)   # after changing db/queries or db/migrations
 ```
 
 The end-to-end tests in `e2e/` run a server and its clients in one process,
