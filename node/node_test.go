@@ -486,3 +486,32 @@ func (w testWriter) Write(p []byte) (int, error) {
 	w.t.Log(strings.TrimRight(string(p), "\n"))
 	return len(p), nil
 }
+
+// A server that names the address to bind gets that address: a firewall
+// rule is written for a port, not for whatever the system picked.
+func TestBindTakesTheAddressItIsGiven(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	// A port that was free a moment ago.
+	probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := probe.LocalAddr().(*net.UDPAddr).AddrPort()
+	probe.Close()
+
+	ep, err := Bind(ctx, ServerConfig{Key: newKey(t), ALPN: testALPN, Local: true, Bind: want, Log: testLogger(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ep.Shutdown(context.Background())
+	if got := ep.LocalAddr(); got != want {
+		t.Fatalf("bound to %s, want %s", got, want)
+	}
+
+	// The port is taken now, and a second server asking for it is told.
+	if second, err := Bind(ctx, ServerConfig{Key: newKey(t), ALPN: testALPN, Local: true, Bind: want, Log: testLogger(t)}); err == nil {
+		second.Shutdown(context.Background())
+		t.Fatal("a second endpoint was bound to the same address")
+	}
+}

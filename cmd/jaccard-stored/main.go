@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -71,6 +72,7 @@ type settings struct {
 	partSize      int64
 	verifyJobs    int
 	maxPackBytes  int64
+	bind          netip.AddrPort
 }
 
 // newApp returns the command. run is what it does once the settings are
@@ -105,6 +107,8 @@ func newApp(stderr io.Writer, run func(context.Context, io.Writer, settings) err
 				Usage: "`SIZE` above which data is uploaded in parts, and of a part"},
 			&cli.IntFlag{Name: "verify-jobs", EnvVars: []string{"JACCARD_VERIFY_JOBS"}, Value: 2,
 				Usage: "packs verified at once; each needs scratch space for its uncompressed data"},
+			&cli.StringFlag{Name: "bind", EnvVars: []string{"JACCARD_BIND"},
+				Usage: "UDP `IP:PORT` the iroh endpoint binds, for a firewall rule to name; 0.0.0.0:PORT is every IPv4 address (default: every address, a port the system picks)"},
 			&cli.StringFlag{Name: "max-pack-size", EnvVars: []string{"JACCARD_MAX_PACK_SIZE"}, Value: "16GiB",
 				Usage: "largest uncompressed `SIZE` of a pack; the scratch space needed is this times --verify-jobs"},
 		},
@@ -142,6 +146,11 @@ func readSettings(c *cli.Context) (settings, error) {
 	}
 	if s.maxPackBytes, err = parseSize(c.String("max-pack-size")); err != nil {
 		return settings{}, fmt.Errorf("--max-pack-size: %w", err)
+	}
+	if b := c.String("bind"); b != "" {
+		if s.bind, err = netip.ParseAddrPort(b); err != nil {
+			return settings{}, fmt.Errorf("--bind: %q is not an address to bind: want IP:PORT, such as 0.0.0.0:4435 or [::]:4435", b)
+		}
 	}
 	switch {
 	case s.partSize < minPartSize:
@@ -250,7 +259,7 @@ func serve(ctx context.Context, stderr io.Writer, s settings) (err error) {
 		web.Shutdown(stop)
 	})
 
-	ep, err := node.Bind(ctx, node.ServerConfig{Key: sk, ALPN: wire.ALPN, Log: log})
+	ep, err := node.Bind(ctx, node.ServerConfig{Key: sk, ALPN: wire.ALPN, Bind: s.bind, Log: log})
 	if err != nil {
 		cancel()
 		return err

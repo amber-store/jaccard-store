@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"net/netip"
 	"os"
 	"reflect"
 	"strings"
@@ -17,7 +18,7 @@ var variables = []string{
 	"JACCARD_DATA", "JACCARD_S3_BUCKET", "JACCARD_S3_PREFIX", "JACCARD_S3_ENDPOINT",
 	"JACCARD_S3_REGION", "JACCARD_S3_PATH_STYLE", "JACCARD_ADMIN_ADDR",
 	"JACCARD_UPLOAD_TIMEOUT", "JACCARD_URL_TTL", "JACCARD_PART_SIZE", "JACCARD_VERIFY_JOBS",
-	"JACCARD_MAX_PACK_SIZE",
+	"JACCARD_MAX_PACK_SIZE", "JACCARD_BIND",
 }
 
 // settingsFor runs the command with args under env alone and returns the
@@ -76,6 +77,7 @@ func TestEveryVariableIsRead(t *testing.T) {
 		"JACCARD_PART_SIZE":      "16MiB",
 		"JACCARD_VERIFY_JOBS":    "5",
 		"JACCARD_MAX_PACK_SIZE":  "3GiB",
+		"JACCARD_BIND":           "0.0.0.0:4435",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -91,6 +93,7 @@ func TestEveryVariableIsRead(t *testing.T) {
 		partSize:      16 << 20,
 		verifyJobs:    5,
 		maxPackBytes:  3 << 30,
+		bind:          netip.MustParseAddrPort("0.0.0.0:4435"),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
@@ -111,11 +114,12 @@ func TestFlagWinsOverVariable(t *testing.T) {
 		"JACCARD_PART_SIZE":      "16MiB",
 		"JACCARD_VERIFY_JOBS":    "5",
 		"JACCARD_MAX_PACK_SIZE":  "3GiB",
+		"JACCARD_BIND":           "0.0.0.0:4435",
 	},
 		"--data", "/flag/data", "--s3-bucket", "flag-bucket", "--s3-prefix", "flag/",
 		"--s3-endpoint", "http://flag:9000", "--s3-region", "eu-flag-1", "--s3-path-style=false",
 		"--admin-addr", "127.0.0.1:1", "--upload-timeout", "2h", "--url-ttl", "3h",
-		"--part-size", "8MiB", "--verify-jobs", "7", "--max-pack-size", "1GiB")
+		"--part-size", "8MiB", "--verify-jobs", "7", "--max-pack-size", "1GiB", "--bind", "[::]:5000")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +132,7 @@ func TestFlagWinsOverVariable(t *testing.T) {
 		partSize:      8 << 20,
 		verifyJobs:    7,
 		maxPackBytes:  1 << 30,
+		bind:          netip.MustParseAddrPort("[::]:5000"),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
@@ -148,6 +153,9 @@ func TestRefusals(t *testing.T) {
 		"URL lifetime under 1s": {"--data", "/d", "--s3-bucket", "b", "--url-ttl", "500ms"},
 		"URL lifetime over 7d":  {"--data", "/d", "--s3-bucket", "b", "--url-ttl", "169h"},
 		"pack size not a size":  {"--data", "/d", "--s3-bucket", "b", "--max-pack-size", "lots"},
+		"bind without a port":   {"--data", "/d", "--s3-bucket", "b", "--bind", "0.0.0.0"},
+		"bind without an IP":    {"--data", "/d", "--s3-bucket", "b", "--bind", ":4435"},
+		"bind to a host name":   {"--data", "/d", "--s3-bucket", "b", "--bind", "localhost:4435"},
 		"no verifier":           {"--data", "/d", "--s3-bucket", "b", "--verify-jobs", "0"},
 		"an argument":           {"--data", "/d", "--s3-bucket", "b", "extra"},
 	} {

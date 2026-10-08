@@ -115,3 +115,33 @@ func TestIPv4Alone(t *testing.T) {
 		}
 	}
 }
+
+// What is advertised has to be what the socket can be reached at: every
+// interface address for a socket of both families, the IPv4 ones for a
+// socket of IPv4, and the one address for a socket bound to one.
+func TestDirectAddrsFollowTheBoundSocket(t *testing.T) {
+	ifaces := []ifaceAddrs{
+		{name: "eth0", up: true, addrs: []net.Addr{ipNet("203.0.113.7/24"), ipNet("2001:db8::7/64")}},
+		{name: "vlan4002", up: true, addrs: []net.Addr{ipNet("10.255.0.131/24")}},
+		{name: "lo", up: true, addrs: []net.Addr{ipNet("127.0.0.1/8")}},
+	}
+	for _, tc := range []struct {
+		name  string
+		local string
+		want  []string
+	}{
+		{"both families", "[::]:4435", []string{"203.0.113.7:4435", "[2001:db8::7]:4435", "10.255.0.131:4435"}},
+		{"IPv4 alone", "0.0.0.0:4435", []string{"203.0.113.7:4435", "10.255.0.131:4435"}},
+		{"one address", "10.255.0.131:4435", []string{"10.255.0.131:4435"}},
+		{"one IPv6 address", "[2001:db8::7]:4435", []string{"[2001:db8::7]:4435"}},
+		{"loopback", "127.0.0.1:4435", nil},
+	} {
+		var want []netip.AddrPort
+		for _, s := range tc.want {
+			want = append(want, netip.MustParseAddrPort(s))
+		}
+		if got := directAddrs(ifaces, netip.MustParseAddrPort(tc.local)); !slices.Equal(got, want) {
+			t.Errorf("%s (%s): got %v, want %v", tc.name, tc.local, got, want)
+		}
+	}
+}

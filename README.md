@@ -54,8 +54,13 @@ answers mDNS on the local network.
 | `--part-size N` | `JACCARD_PART_SIZE` | `64MiB` |
 | `--verify-jobs N` | `JACCARD_VERIFY_JOBS` | `2` |
 | `--max-pack-size N` | `JACCARD_MAX_PACK_SIZE` | `16GiB` |
+| `--bind IP:PORT` | `JACCARD_BIND` | every address, a port the system picks |
 
-A flag wins over its variable. The two durations are lifetimes of pre-signed
+A flag wins over its variable. `--bind` names the UDP address of the iroh
+endpoint, so that a firewall rule can be written for its port;
+`0.0.0.0:4435` is every IPv4 address of the machine. The server advertises
+the addresses that socket can be reached at, and clients dial them directly
+instead of going through a relay. The two durations are lifetimes of pre-signed
 URLs, between one second and seven days. The server needs scratch space for
 `--max-pack-size` times `--verify-jobs`: a pack is decompressed there to be
 verified, and the limit is what keeps a few megabytes of upload from
@@ -98,7 +103,10 @@ docker logs jaccard 2>&1 | grep endpoint=   # the ID clients need
 - No port is published for iroh: the server binds a UDP port of its own
   choosing, and clients reach a container through iroh's relays. Requests
   are small and pack bytes do not pass through the server, so that costs
-  little. With `--network host` on Linux, direct connections work too.
+  little. To be dialed directly, run the container on the host network
+  (`--network host` on Linux) and pin the port with `JACCARD_BIND`, such as
+  `0.0.0.0:4435`. On the host network also set `JACCARD_ADMIN_ADDR` to an
+  address that is not public: the image's default is every address.
 - The S3 endpoint the server is given is the one in the URLs it hands to
   clients. It has to be reachable for them under the same name.
 

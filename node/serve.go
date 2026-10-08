@@ -49,8 +49,16 @@ type ServerConfig struct {
 	Key irohkey.SecretKey
 	// ALPN is the protocol the endpoint accepts connections for.
 	ALPN string
-	// Local is for tests: the endpoint is bound to 127.0.0.1, uses no
-	// relay and is announced nowhere. Clients dial Endpoint.LocalAddr.
+	// Bind is the UDP address the endpoint binds. The zero value leaves it
+	// to go-iroh: every address of both families, on a port the system
+	// picks. A server behind a firewall, or on the host network of a
+	// cluster, names a port here so that a rule can be written for it. An
+	// unspecified address binds every address of its family, so 0.0.0.0
+	// serves IPv4 alone.
+	Bind netip.AddrPort
+	// Local is for tests: the endpoint uses no relay and is announced
+	// nowhere, and is bound to 127.0.0.1 unless Bind says otherwise.
+	// Clients dial Endpoint.LocalAddr.
 	Local bool
 	// Log receives what Bind and the announcing have to say. Nil means
 	// slog.Default().
@@ -81,10 +89,11 @@ func Bind(ctx context.Context, cfg ServerConfig) (*iroh.Endpoint, error) {
 	opts := []iroh.Option{iroh.WithSecretKey(cfg.Key), iroh.WithALPNs(cfg.ALPN)}
 
 	if cfg.Local {
-		ep, err := iroh.Bind(ctx, append(opts,
-			iroh.WithRelayMode(relay.ModeDisabled()),
-			iroh.WithBindAddr(netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 0)),
-		)...)
+		addr := cfg.Bind
+		if !addr.IsValid() {
+			addr = netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), 0)
+		}
+		ep, err := iroh.Bind(ctx, append(opts, iroh.WithRelayMode(relay.ModeDisabled()), iroh.WithBindAddr(addr))...)
 		if err != nil {
 			return nil, fmt.Errorf("bind: %w", err)
 		}
@@ -92,7 +101,11 @@ func Bind(ctx context.Context, cfg ServerConfig) (*iroh.Endpoint, error) {
 		return ep, nil
 	}
 
-	ep, err := iroh.Bind(ctx, append(opts, iroh.WithRelayMode(relay.ModeDefault()))...)
+	opts = append(opts, iroh.WithRelayMode(relay.ModeDefault()))
+	if cfg.Bind.IsValid() {
+		opts = append(opts, iroh.WithBindAddr(cfg.Bind))
+	}
+	ep, err := iroh.Bind(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("bind: %w", err)
 	}
@@ -122,7 +135,7 @@ func announce(ctx context.Context, ep *iroh.Endpoint, sk irohkey.SecretKey, log 
 	if err != nil {
 		return fmt.Errorf("interface addresses: %w", err)
 	}
-	direct := advertisedAddrPorts(ifaces, ep.LocalAddr().Port())
+	direct := directAddrs(ifaces, ep.LocalAddr())
 	directAddrs := make([]netaddr.TransportAddr, 0, len(direct))
 	for _, ap := range direct {
 		ep.AddExternalAddr(ap)
@@ -234,6 +247,33 @@ func advertisedAddrPorts(ifaces []ifaceAddrs, port uint16) []netip.AddrPort {
 		}
 	}
 	return out
+}
+
+// directAddrs returns the addresses at which an endpoint bound to local can
+// be dialed directly. A socket bound to one address is reached at that one
+// and no other. A socket bound to every address is reached at the addresses
+// of the interfaces, of both families or, when it was bound as 0.0.0.0, of
+// IPv4 alone. An address nobody can reach it at costs every client that
+// tries it a part of its time to connect.
+func directAddrs(ifaces []ifaceAddrs, local netip.AddrPort) []netip.AddrPort {
+	addr := local.Addr().Unmap()
+	if !addr.IsUnspecified() {
+		if addr.IsLoopback() || addr.IsLinkLocalUnicast() {
+			return nil
+		}
+		return []netip.AddrPort{netip.AddrPortFrom(addr, local.Port())}
+	}
+	all := advertisedAddrPorts(ifaces, local.Port())
+	if !addr.Is4() {
+		return all
+	}
+	var v4 []netip.AddrPort
+	for _, ap := range all {
+		if ap.Addr().Is4() {
+			v4 = append(v4, ap)
+		}
+	}
+	return v4
 }
 
 // localIfaceAddrs lists the machine's interfaces for advertisedAddrPorts.

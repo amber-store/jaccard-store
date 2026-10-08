@@ -412,6 +412,12 @@ with what it has), advertises its interface addresses, publishes itself
 through pkarr and answers mDNS, as `amber-serve` in transport-iroh
 does. The endpoint ID is logged at start. Clients need nothing else.
 
+The endpoint binds every address on a port the system picks, unless
+`--bind` names the UDP address: a server behind a firewall or on the host
+network of a cluster pins its port that way. What is advertised follows the
+socket: the one address it was bound to, or the interface addresses of the
+families it serves.
+
 ### 7.5 Command
 
 Every option can be given as a flag or as an environment variable. The flag
@@ -431,6 +437,7 @@ wins when both are set.
 | `--part-size N` | `JACCARD_PART_SIZE` | `64MiB` |
 | `--verify-jobs N` | `JACCARD_VERIFY_JOBS` | `2` |
 | `--max-pack-size N` | `JACCARD_MAX_PACK_SIZE` | `16GiB` |
+| `--bind IP:PORT` | `JACCARD_BIND` | every address, a port the system picks |
 
 The two durations are lifetimes of pre-signed URLs and have to lie between
 one second and seven days. The scratch space a server needs is
