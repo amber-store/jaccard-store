@@ -464,8 +464,14 @@ func TestPushUploadRefusals(t *testing.T) {
 	base := h.pushBase("v1", v1)
 
 	req := wire.Request{Op: wire.OpPushUpload, Name: "v2", Root: v2.root[:], DataSize: 10, Objects: 1}
+	// A parent no pack has for a root. The keys come in key order, so the
+	// first of them is now and then the root itself, and a pack that names
+	// itself as its parent is refused for that instead.
 	unknown := req
 	unknown.Parent = v2.keys[0][:]
+	if v2.keys[0] == v2.root {
+		unknown.Parent = v2.keys[1][:]
+	}
 	h.refused(h.handle(alice, unknown), wire.CodeParentGone)
 
 	// A patch pack is nobody's parent.
