@@ -132,3 +132,9 @@ The end-to-end tests in `e2e/` run a server and its clients in one process,
 over real iroh endpoints on loopback and an S3 in memory. Nothing in the
 test suite needs the network, except `TestOnline` in `node/`, which runs
 only with `JACCARD_TEST_ONLINE=1`.
+
+## License
+
+Licensed under the GNU Lesser General Public License, version 3 only
+(`LGPL-3.0-only`). See [`LICENSE`](LICENSE) for the LGPL terms and
+[`COPYING`](COPYING) for the GPL terms incorporated by the LGPL.

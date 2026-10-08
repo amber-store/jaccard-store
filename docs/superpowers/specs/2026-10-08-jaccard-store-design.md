@@ -49,6 +49,8 @@ and the admin page shows what the store holds and who put it there.
 - The **statistics are computed by the server**, never reported by the
   client.
 - CLI on `urfave/cli/v2`.
+- Licensed `LGPL-3.0-only`, as clamp is: `LICENSE` holds the LGPL, `COPYING`
+  the GPL it incorporates.
 
 ### 2.2 Made in design, accepted by the owner
 
