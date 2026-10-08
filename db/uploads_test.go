@@ -176,8 +176,9 @@ func TestCommitUploadRecordsThePack(t *testing.T) {
 		patch.SharedObjects != v.SharedObjects || patch.SharedBytes != v.SharedBytes {
 		t.Fatalf("patch = %+v", patch)
 	}
-	wantQueued(t, d, t1.Add(-time.Second))
-	wantQueued(t, d, t1, "patch.links")
+	// A patch pack has no links, and nothing was written under the key the
+	// upload kept for them: there is nothing to clear.
+	wantQueued(t, d, later)
 
 	_, err = d.CommitUpload(ctx, "nothing", v, t1, later)
 	wantNotFound(t, err)
@@ -423,7 +424,7 @@ func TestEverythingSurvivesCloseAndOpen(t *testing.T) {
 	if got, err := d.Stats(ctx); err != nil || got != stats {
 		t.Fatalf("Stats: %+v, %v; want %+v", got, err, stats)
 	}
-	if got := queued(t, d, later); !slices.Equal(got, wantDue) || len(got) != 5 {
+	if got := queued(t, d, later); !slices.Equal(got, wantDue) || len(got) != 4 {
 		t.Fatalf("deletions = %q, want %q", got, wantDue)
 	}
 

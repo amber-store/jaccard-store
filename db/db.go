@@ -6,8 +6,10 @@
 // A pack is live while a ref points at it, a pack names it as parent, or an
 // open upload names it as parent. Whatever takes such a hold away (a ref that
 // moves or is deleted, an upload that ends) deletes, in the same transaction,
-// the packs that are no longer live, pass after pass until a pass finds none:
-// a patch pack that goes can free its base. The bucket keys of every pack
+// the pack it was taken from if nothing else holds it, and after a patch pack
+// its base in turn. Only those packs are looked at: nothing else can have
+// died, so collecting costs the same however many packs there are. The
+// bucket keys of every pack
 // deleted are queued in deletions in that transaction too, as are the keys of
 // an upload that ends without a pack, so a crash leaves nothing in the bucket
 // that the database does not know of.

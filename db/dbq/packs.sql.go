@@ -36,32 +36,40 @@ func (q *Queries) ChildRoots(ctx context.Context, parentID sql.NullInt64) ([][]b
 	return items, nil
 }
 
-const deleteDeadPacks = `-- name: DeleteDeadPacks :many
+const deletePackIfDead = `-- name: DeletePackIfDead :many
 DELETE FROM packs
-WHERE NOT EXISTS (SELECT 1 FROM refs AS r WHERE r.pack_id = packs.id)
+WHERE packs.id = ?1
+  AND NOT EXISTS (SELECT 1 FROM refs AS r WHERE r.pack_id = packs.id)
   AND NOT EXISTS (SELECT 1 FROM packs AS c WHERE c.parent_id = packs.id)
   AND NOT EXISTS (SELECT 1 FROM uploads AS u WHERE u.parent_id = packs.id)
-RETURNING data_key, index_key, links_key
+RETURNING parent_id, data_key, index_key, links_key
 `
 
-type DeleteDeadPacksRow struct {
+type DeletePackIfDeadRow struct {
+	ParentID sql.NullInt64
 	DataKey  string
 	IndexKey string
 	LinksKey sql.NullString
 }
 
-// One pass of collection: the packs nothing holds. Deleting a patch pack can
-// leave its base without a holder, which the next pass finds.
-func (q *Queries) DeleteDeadPacks(ctx context.Context) ([]DeleteDeadPacksRow, error) {
-	rows, err := q.db.QueryContext(ctx, deleteDeadPacks)
+// The pack with the given ID, if nothing holds it: no row otherwise. A patch
+// pack that goes can leave its base without a holder, so the parent comes
+// back to be looked at next.
+func (q *Queries) DeletePackIfDead(ctx context.Context, id int64) ([]DeletePackIfDeadRow, error) {
+	rows, err := q.db.QueryContext(ctx, deletePackIfDead, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []DeleteDeadPacksRow{}
+	items := []DeletePackIfDeadRow{}
 	for rows.Next() {
-		var i DeleteDeadPacksRow
-		if err := rows.Scan(&i.DataKey, &i.IndexKey, &i.LinksKey); err != nil {
+		var i DeletePackIfDeadRow
+		if err := rows.Scan(
+			&i.ParentID,
+			&i.DataKey,
+			&i.IndexKey,
+			&i.LinksKey,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

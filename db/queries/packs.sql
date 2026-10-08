@@ -46,14 +46,16 @@ GROUP BY p.id
 ORDER BY count(*) DESC, p.root ASC
 LIMIT 16;
 
--- name: DeleteDeadPacks :many
--- One pass of collection: the packs nothing holds. Deleting a patch pack can
--- leave its base without a holder, which the next pass finds.
+-- name: DeletePackIfDead :many
+-- The pack with the given ID, if nothing holds it: no row otherwise. A patch
+-- pack that goes can leave its base without a holder, so the parent comes
+-- back to be looked at next.
 DELETE FROM packs
-WHERE NOT EXISTS (SELECT 1 FROM refs AS r WHERE r.pack_id = packs.id)
+WHERE packs.id = sqlc.arg(id)
+  AND NOT EXISTS (SELECT 1 FROM refs AS r WHERE r.pack_id = packs.id)
   AND NOT EXISTS (SELECT 1 FROM packs AS c WHERE c.parent_id = packs.id)
   AND NOT EXISTS (SELECT 1 FROM uploads AS u WHERE u.parent_id = packs.id)
-RETURNING data_key, index_key, links_key;
+RETURNING parent_id, data_key, index_key, links_key;
 
 -- name: ListPacks :many
 SELECT p.id, p.root, p.parent_id, p.data_key, p.index_key, p.links_key,

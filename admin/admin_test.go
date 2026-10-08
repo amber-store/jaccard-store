@@ -116,9 +116,7 @@ func TestStats(t *testing.T) {
 	var got map[string]float64
 	header := s.get(t, "/api/stats", http.StatusOK, &got)
 	want := map[string]float64{
-		// One deletion: the links key of the patch pack's upload, which a
-		// patch pack never fills and the database clears to be sure.
-		"refs": 3, "base_packs": 1, "patch_packs": 1, "uploads": 1, "deletions": 1,
+		"refs": 3, "base_packs": 1, "patch_packs": 1, "uploads": 1, "deletions": 0,
 		"s3_bytes":      400 + 456 + 100 + 120 + 148,
 		"data_bytes":    400 + 120,
 		"stored_bytes":  1000 + 300,

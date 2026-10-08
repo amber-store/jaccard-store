@@ -34,24 +34,48 @@ func refOf(r refRow) (Ref, error) {
 	}, nil
 }
 
-// collect deletes the packs that are no longer live, pass after pass until a
-// pass finds none, and queues their bucket keys for deletion not before
-// deleteAt. Their rows in sketch_keys go with them.
-func collect(ctx context.Context, q *dbq.Queries, deleteAt time.Time) error {
-	for {
-		dead, err := q.DeleteDeadPacks(ctx)
+// collect deletes those of the suspect packs that nothing holds any more,
+// and after a patch pack its base if that was the last hold on it, and
+// queues their bucket keys for deletion not before deleteAt. Their rows in
+// sketch_keys go with them.
+//
+// A pack loses a hold only when a ref moves off it or is deleted, when a
+// pack leaning on it is collected, or when an upload naming it ends; and a
+// pack is never recorded without the ref that holds it. So the packs a
+// caller has just taken a hold off are the only ones that can have died, and
+// no pass over all packs is needed. An ID of zero stands for no pack.
+func collect(ctx context.Context, q *dbq.Queries, deleteAt time.Time, suspects ...int64) error {
+	for len(suspects) > 0 {
+		id := suspects[0]
+		suspects = suspects[1:]
+		if id == 0 {
+			continue
+		}
+		dead, err := q.DeletePackIfDead(ctx, id)
 		if err != nil {
 			return err
-		}
-		if len(dead) == 0 {
-			return nil
 		}
 		for _, p := range dead {
 			if err := queue(ctx, q, deleteAt, p.DataKey, p.IndexKey, p.LinksKey.String); err != nil {
 				return err
 			}
+			suspects = append(suspects, p.ParentID.Int64)
 		}
 	}
+	return nil
+}
+
+// heldBy returns the ID of the pack the ref called name points at, and zero
+// when there is no such ref.
+func heldBy(ctx context.Context, q *dbq.Queries, name string) (int64, error) {
+	r, err := q.RefByName(ctx, name)
+	if notFound(err) == ErrNotFound {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return r.PackID, nil
 }
 
 // queue queues the bucket keys that are not empty for deletion not before
@@ -92,10 +116,14 @@ func (d *DB) PointRef(ctx context.Context, name string, root key.Key, by string,
 			return err
 		}
 		found = true
+		was, err := heldBy(ctx, q, name)
+		if err != nil {
+			return err
+		}
 		if err := pointRef(ctx, q, name, p.ID, by, now); err != nil {
 			return err
 		}
-		return collect(ctx, q, deleteAt)
+		return collect(ctx, q, deleteAt, was)
 	})
 	if err != nil {
 		return false, err
@@ -186,6 +214,10 @@ func successor(prefix string) (upper string, bounded bool) {
 // deleteAt. The error is ErrNotFound when there is no such ref.
 func (d *DB) DeleteRef(ctx context.Context, name string, deleteAt time.Time) error {
 	return d.write(ctx, func(q *dbq.Queries) error {
+		was, err := heldBy(ctx, q, name)
+		if err != nil {
+			return err
+		}
 		n, err := q.DeleteRef(ctx, name)
 		if err != nil {
 			return err
@@ -193,6 +225,6 @@ func (d *DB) DeleteRef(ctx context.Context, name string, deleteAt time.Time) err
 		if n == 0 {
 			return ErrNotFound
 		}
-		return collect(ctx, q, deleteAt)
+		return collect(ctx, q, deleteAt, was)
 	})
 }

@@ -55,7 +55,7 @@ func TestStats(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Stats{
-		Refs: 4, BasePacks: 2, PatchPacks: 1, Uploads: 1, Deletions: 4,
+		Refs: 4, BasePacks: 2, PatchPacks: 1, Uploads: 1, Deletions: 3,
 		S3Bytes:      (100 + 60 + 20) + (10 + 104) + (200 + 148 + 30),
 		DataBytes:    100 + 10 + 200,
 		StoredBytes:  1000 + 50 + 3000,

@@ -130,8 +130,8 @@ func (d *DB) CreateUpload(ctx context.Context, u Upload, parent *key.Key) (Uploa
 // CommitUpload records the verified pack of an upload, points the upload's
 // ref at it and forgets the upload. A base pack, which is one without a
 // parent, comes with its sketch and keeps the upload's links key; a patch
-// pack comes without a sketch, and the links key it never wrote is queued
-// for deletion at now with the rest of what the upload leaves behind.
+// pack comes without a sketch and has no links: nothing was written under
+// the upload's links key, and nothing is recorded of it.
 //
 // If the root has a pack by now, nothing is recorded: the upload's keys and
 // its multipart upload are queued for deletion at now and the ref is pointed
@@ -163,10 +163,16 @@ func (d *DB) CommitUpload(ctx context.Context, id string, v Verified, now, delet
 		default:
 			return err
 		}
+		was, err := heldBy(ctx, q, u.Name)
+		if err != nil {
+			return err
+		}
 		if err := pointRef(ctx, q, u.Name, packID, u.Uploader, now); err != nil {
 			return err
 		}
-		if err := collect(ctx, q, deleteAt); err != nil {
+		// The upload has let go of its parent; if the pack was recorded it
+		// holds the parent in the upload's place.
+		if err := collect(ctx, q, deleteAt, was, u.ParentID.Int64); err != nil {
 			return err
 		}
 		p, err = packByID(ctx, q, packID)
@@ -205,9 +211,6 @@ func insertPack(ctx context.Context, q *dbq.Queries, u dbq.Upload, v Verified, n
 	id, err := q.InsertPack(ctx, params)
 	if err != nil {
 		return 0, err
-	}
-	if !base {
-		return id, queue(ctx, q, now, u.LinksKey)
 	}
 	for _, k := range sk {
 		if err := q.InsertSketchKey(ctx, dbq.InsertSketchKeyParams{Key: k[:], PackID: id}); err != nil {
@@ -271,7 +274,7 @@ func (d *DB) FailUpload(ctx context.Context, id string, now, deleteAt time.Time)
 		if err := discard(ctx, q, u, now); err != nil {
 			return err
 		}
-		return collect(ctx, q, deleteAt)
+		return collect(ctx, q, deleteAt, u.ParentID.Int64)
 	})
 }
 
@@ -377,6 +380,7 @@ func (d *DB) ExpireUploads(ctx context.Context, now, again, deleteAt time.Time) 
 		if err != nil || len(rows) == 0 {
 			return err
 		}
+		var parents []int64
 		for _, u := range rows {
 			if err := discard(ctx, q, u, now); err != nil {
 				return err
@@ -384,9 +388,10 @@ func (d *DB) ExpireUploads(ctx context.Context, now, again, deleteAt time.Time) 
 			if err := queue(ctx, q, again, u.DataKey, u.IndexKey, u.LinksKey); err != nil {
 				return err
 			}
+			parents = append(parents, u.ParentID.Int64)
 		}
 		expired = len(rows)
-		return collect(ctx, q, deleteAt)
+		return collect(ctx, q, deleteAt, parents...)
 	})
 	if err != nil {
 		return 0, err
