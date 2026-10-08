@@ -3,11 +3,16 @@
 //
 //	jaccard-store --store DIR --server ENDPOINT_ID push [--as NAME] [--min-dedup F] [--no-progress] REF
 //	jaccard-store --store DIR --server ENDPOINT_ID pull [--as REF] [--no-progress] NAME
+//	jaccard-store --server ENDPOINT_ID push-dir [--min-dedup F] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR NAME
+//	jaccard-store --server ENDPOINT_ID pull-dir [--temp-dir DIR] [--no-progress] NAME DIR
 //	jaccard-store --server ENDPOINT_ID ls [PREFIX]
 //	jaccard-store --server ENDPOINT_ID rm NAME
 //
 // The store is the directory core's own CLI works on (a packstore and a
 // refstore); ingesting into it and restoring from it are that CLI's job.
+// push-dir and pull-dir need no store: they take a directory to the server
+// and bring one back through a store they make for the one command and
+// remove again (dir.go).
 // The server is named by its endpoint ID alone. Every option is a flag and
 // an environment variable; the flag wins.
 //
@@ -91,10 +96,18 @@ func defaultKeyFile() string {
 // newApp returns the command. connect is how it reaches a server, which
 // lets a test put something else in the server's place.
 func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
-	// A flag of push and of pull alike; each command gets its own.
+	// Flags that several commands have; each command gets its own.
 	noProgress := func() cli.Flag {
 		return &cli.BoolFlag{Name: "no-progress", EnvVars: []string{"JACCARD_NO_PROGRESS"},
 			Usage: "do not show on standard error what is being done"}
+	}
+	minDedup := func() cli.Flag {
+		return &cli.Float64Flag{Name: "min-dedup", EnvVars: []string{"JACCARD_MIN_DEDUP"}, Value: 0.5,
+			Usage: "upload a patch pack when the nearest base pack holds at least this `FRACTION` of the bytes"}
+	}
+	tempDir := func() cli.Flag {
+		return &cli.StringFlag{Name: "temp-dir", EnvVars: []string{"JACCARD_TEMP_DIR"},
+			Usage: "`DIR`ectory the temporary store is made in and removed from (default: the system's temporary directory)"}
 	}
 	return &cli.App{
 		Name:            "jaccard-store",
@@ -120,8 +133,7 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 				// first argument that is not one.
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "as", Usage: "`NAME` of the reference on the server (default: REF)"},
-					&cli.Float64Flag{Name: "min-dedup", EnvVars: []string{"JACCARD_MIN_DEDUP"}, Value: 0.5,
-						Usage: "upload a patch pack when the nearest base pack holds at least this `FRACTION` of the bytes"},
+					minDedup(),
 					noProgress(),
 				},
 				Action: func(c *cli.Context) error { return runPush(c, connect) },
@@ -135,6 +147,31 @@ func newApp(stdout, stderr io.Writer, connect dialer) *cli.App {
 					noProgress(),
 				},
 				Action: func(c *cli.Context) error { return runPull(c, connect) },
+			},
+			{
+				Name: "push-dir",
+				Usage: "make NAME on the server point at the content of the directory DIR, without a local store: " +
+					"DIR is imported into a temporary one that is removed afterwards",
+				ArgsUsage: "DIR NAME",
+				Flags: []cli.Flag{
+					minDedup(),
+					&cli.BoolFlag{Name: "no-ignore", EnvVars: []string{"JACCARD_NO_IGNORE"},
+						Usage: "do not honor .amberignore files"},
+					tempDir(),
+					noProgress(),
+				},
+				Action: func(c *cli.Context) error { return runPushDir(c, connect) },
+			},
+			{
+				Name: "pull-dir",
+				Usage: "extract the server's reference NAME to the directory DIR, which is not there yet or empty, without a local store: " +
+					"the packs are fetched into a temporary one that is removed afterwards",
+				ArgsUsage: "NAME DIR",
+				Flags: []cli.Flag{
+					tempDir(),
+					noProgress(),
+				},
+				Action: func(c *cli.Context) error { return runPullDir(c, connect) },
 			},
 			{
 				Name:      "ls",
@@ -182,9 +219,9 @@ func runPush(c *cli.Context, connect dialer) error {
 	if name == "" {
 		name = ref
 	}
-	minDedup := c.Float64("min-dedup")
-	if !(minDedup >= 0) { // which a NaN is not either
-		return fmt.Errorf("--min-dedup: %v is not a fraction: want 0 or more", minDedup)
+	minDedup, err := minDedupOf(c)
+	if err != nil {
+		return err
 	}
 	s := readSettings(c)
 	store, err := openStore(s.store)
@@ -207,17 +244,32 @@ func runPush(c *cli.Context, connect dialer) error {
 	if err != nil {
 		return err
 	}
+	printPushed(c.App.Writer, name, root, res)
+	return nil
+}
+
+// minDedupOf returns what --min-dedup says, if that is a fraction.
+func minDedupOf(c *cli.Context) (float64, error) {
+	minDedup := c.Float64("min-dedup")
+	if !(minDedup >= 0) { // which a NaN is not either
+		return 0, fmt.Errorf("--min-dedup: %v is not a fraction: want 0 or more", minDedup)
+	}
+	return minDedup, nil
+}
+
+// printPushed writes the result of a push: what name points at now and
+// what was uploaded for it.
+func printPushed(w io.Writer, name string, root key.Key, res client.PushResult) {
 	switch {
 	case res.Stored:
-		fmt.Fprintf(c.App.Writer, "%s %s: the server has the pack already\n", name, root)
+		fmt.Fprintf(w, "%s %s: the server has the pack already\n", name, root)
 	case res.Parent != nil:
-		fmt.Fprintf(c.App.Writer, "%s %s: patch pack of %s, %d objects, %s uploaded\n",
+		fmt.Fprintf(w, "%s %s: patch pack of %s, %d objects, %s uploaded\n",
 			name, root, res.Parent, res.Objects, human.Bytes(res.DataSize))
 	default:
-		fmt.Fprintf(c.App.Writer, "%s %s: base pack, %d objects, %s uploaded\n",
+		fmt.Fprintf(w, "%s %s: base pack, %d objects, %s uploaded\n",
 			name, root, res.Objects, human.Bytes(res.DataSize))
 	}
-	return nil
 }
 
 func runPull(c *cli.Context, connect dialer) error {

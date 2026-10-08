@@ -404,3 +404,32 @@ func TestTheLiveLineHoldsStill(t *testing.T) {
 		}
 	}
 }
+
+// A command that tidies up after a failure shows that as a step: the step
+// that failed keeps its mark, the show goes on, and no total follows.
+func TestAFailedStepDoesNotEndTheShow(t *testing.T) {
+	refused := errors.New("the bucket answered 403")
+	for _, tc := range []struct {
+		live bool
+		want string
+	}{
+		{false, "uploading: failed after 3.0s\ncleaning up (1.0s)\n"},
+		{true, "\r\033[K✗ uploading                    3.0s  failed\n" +
+			"\r\033[K⠹ cleaning up                    0s" +
+			"\r\033[K✓ cleaning up                  1.0s\n"},
+	} {
+		p, out, c := testProgress(tc.live)
+		p.Begin("uploading", 0, client.NoUnit)
+		out.Reset()
+		c.pass(3 * time.Second)
+		p.Fail(refused)
+		p.Fail(refused) // nothing is running: nothing to mark
+		p.Begin("cleaning up", 0, client.NoUnit)
+		c.pass(time.Second)
+		p.End("")
+		p.Close(refused)
+		if out.String() != tc.want {
+			t.Errorf("live %v:\n got %q\nwant %q", tc.live, out.String(), tc.want)
+		}
+	}
+}

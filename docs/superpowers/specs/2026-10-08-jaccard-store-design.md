@@ -530,22 +530,28 @@ take them.
 jaccard-store --store DIR --server ENDPOINT_ID [--key FILE] COMMAND
   push [--as NAME] [--min-dedup 0.5] [--no-progress] REF
   pull [--as REF] [--no-progress] NAME
+  push-dir [--min-dedup 0.5] [--no-ignore] [--temp-dir DIR] [--no-progress] DIR NAME
+  pull-dir [--temp-dir DIR] [--no-progress] NAME DIR
   ls [PREFIX]
   rm NAME
 ```
 
-Options come before the argument, as with core's CLI.
+`--store` is for push and pull; the other commands do not read it.
+
+Options come before the arguments, as with core's CLI.
 
 Every option can be given as a flag or as an environment variable. The flag
 wins when both are set.
 
 | flag | environment | default |
 | --- | --- | --- |
-| `--store DIR` | `JACCARD_STORE`, then `AMBER_STORE` | required |
+| `--store DIR` | `JACCARD_STORE`, then `AMBER_STORE` | required for push and pull |
 | `--server ENDPOINT_ID` | `JACCARD_SERVER` | required |
 | `--key FILE` | `JACCARD_KEY` | `jaccard-store/client.key` in the user's configuration directory, created on first use |
-| `push --min-dedup F` | `JACCARD_MIN_DEDUP` | `0.5` |
-| `push --no-progress`, `pull --no-progress` | `JACCARD_NO_PROGRESS` | progress is shown |
+| `push --min-dedup F`, `push-dir --min-dedup F` | `JACCARD_MIN_DEDUP` | `0.5` |
+| `push-dir --no-ignore` | `JACCARD_NO_IGNORE` | `.amberignore` files are honored |
+| `push-dir --temp-dir DIR`, `pull-dir --temp-dir DIR` | `JACCARD_TEMP_DIR` | the system's temporary directory |
+| `--no-progress` on push, pull, push-dir and pull-dir | `JACCARD_NO_PROGRESS` | progress is shown |
 
 `--as` has no variable: it names the one ref of one invocation. `AMBER_STORE`
 is read as well because it is what core's own CLI uses for the same
@@ -589,6 +595,70 @@ failed one is marked as failed or interrupted, and a total follows the
 last. Off a terminal a step is a plain line when it ends, and one every
 five seconds while it runs. `--no-progress` shows nothing; the command's
 result goes to standard output either way.
+
+### 9.5 A directory without a store
+
+`push-dir DIR NAME` and `pull-dir NAME DIR` are a push and a pull for
+somebody who has no store and wants none. They are the command's own:
+the client package and the protocol know nothing of them.
+
+Both make a store for the one command, a packstore in a new directory under
+`--temp-dir` (the system's temporary directory by default), written without
+waiting for the disk, and remove it when the command ends: after a success,
+a failure or an interrupt alike. A push builds its pack in the same
+directory.
+
+`push-dir`:
+
+1. Refuse, before anything is read or dialed, a NAME that is no reference
+   name and a DIR that is not a directory. A single file could be imported
+   but not brought back by `pull-dir`.
+2. Connect. The server comes first so that one that cannot be reached does
+   not cost an import; the connection keeps itself alive meanwhile.
+3. Scan DIR for the files and bytes there are to read, then build its tree
+   with core's `ingest`, with core's default chunking and `.amberignore`
+   honored unless `--no-ignore`, and write the objects to the temporary
+   store. The defaults are what `amber-store ingest` uses, so a directory
+   has one root whichever way it is pushed.
+4. Push the root under NAME, as section 9.1.
+5. Remove the temporary store.
+
+`pull-dir`:
+
+1. Refuse, before anything is dialed, a DIR that is there and is not an
+   empty directory.
+2. Connect, and pull NAME into the temporary store as section 9.2, with one
+   addition: `client.PullOptions.Accept` is asked about the root after the
+   `pull` request and before any pack is fetched, and turns down a root
+   that is neither a directory object nor a commit. Nothing is downloaded
+   for a reference that cannot be extracted.
+3. Walk the tree's directories for the regular files and bytes there are
+   to write.
+4. Stream core's `tarexport` of the root into core's `tarextract`, into a
+   directory beside DIR, and rename that to DIR when the tree is whole. An
+   empty DIR gives way to the rename. A failed or interrupted extraction
+   removes what it wrote, so DIR is the whole tree or was not touched.
+5. Remove the temporary store.
+
+Neither core's build nor its export takes a context. An interrupt reaches
+the import between two objects and the extraction where it reads one.
+
+Their steps are shown as section 9.4 describes, around those of the push
+and the pull:
+
+| | step | counted in |
+| --- | --- | --- |
+| push-dir | scanning the directory | nothing |
+| | importing | bytes of file content read |
+| | the steps of a push | |
+| | cleaning up | nothing |
+| pull-dir | the steps of a pull | |
+| | reading the tree | directory objects read, total unknown |
+| | extracting | bytes of file content written |
+| | cleaning up | nothing |
+
+When a step fails, its line is marked and stays, and cleaning up follows as
+a step of its own; no total is shown.
 
 ## 10. Layout
 
@@ -634,6 +704,14 @@ Tests are written before the code they cover.
   refused and removed; the multipart path with a small part size; two
   clients pushing one root at once; a pull that skips the parent.
 - `admin`: the API through `httptest`.
+- The command: its flags and variables against a server that records what
+  it is asked, and `push-dir` and `pull-dir` against one that keeps what is
+  pushed in memory and gives it back. Covered there: a directory with files
+  large and empty, an executable, nested and empty directories and a
+  symbolic link comes back as it went; the temporary store is gone after a
+  success, a failed push and a refused pull; a destination that is taken
+  and a root that is no directory are refused before anything is fetched;
+  an extraction that fails or is interrupted leaves nothing.
 - The same end-to-end cases against an S3 implementation in a container
   (RustFS, through testcontainers; MinIO too when an image for it is
   named). Unlike the fake it checks signatures, signed headers, expiry and

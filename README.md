@@ -137,15 +137,46 @@ jaccard-store pull --as copy releases/1.0
 jaccard-store rm releases/1.0
 ```
 
-Options come before the argument, as with core's CLI.
+A directory goes to the server and comes back without a store of your own:
+
+```sh
+export JACCARD_SERVER=<endpoint id>
+
+jaccard-store push-dir ./some/dir releases/1.0
+jaccard-store pull-dir releases/1.0 ./copy
+```
+
+`push-dir` imports the directory into a store it makes in a temporary
+directory, pushes it from there and removes the store again; `pull-dir`
+fetches into such a store, extracts the tree and removes the store. Both
+remove it however they end, an interrupt included.
+
+- `push-dir` reads the directory as `amber-store ingest` does, with the
+  same chunking, so the same directory is the same root whichever way it
+  was pushed, and a second version becomes a patch pack of the first. It
+  honors `.amberignore` files unless `--no-ignore` is given.
+- `pull-dir` extracts to a directory that is not there yet, or is empty.
+  The tree is written beside it and moved into place when it is whole, so
+  an extraction that fails or is interrupted leaves nothing behind.
+  Permissions, modification times, symbolic links and extended attributes
+  are restored; ownership only when running as root.
+- A reference whose root is a single file (`push` can make one) is refused
+  by `pull-dir` before anything is fetched.
+- The temporary store holds the whole content once more, uncompressed, and
+  a push builds its pack beside it: `--temp-dir` puts it on a disk that has
+  the room.
+
+Options come before the arguments, as with core's CLI.
 
 | flag | environment | default |
 | --- | --- | --- |
 | `--store DIR` | `JACCARD_STORE`, then `AMBER_STORE` | required for push and pull |
 | `--server ENDPOINT_ID` | `JACCARD_SERVER` | required |
 | `--key FILE` | `JACCARD_KEY` | `jaccard-store/client.key` in the user's configuration directory |
-| `push --min-dedup F` | `JACCARD_MIN_DEDUP` | `0.5` |
-| `push --no-progress`, `pull --no-progress` | `JACCARD_NO_PROGRESS` | progress is shown |
+| `push --min-dedup F`, `push-dir --min-dedup F` | `JACCARD_MIN_DEDUP` | `0.5` |
+| `push-dir --no-ignore` | `JACCARD_NO_IGNORE` | `.amberignore` files are honored |
+| `push-dir --temp-dir DIR`, `pull-dir --temp-dir DIR` | `JACCARD_TEMP_DIR` | the system's temporary directory |
+| `--no-progress` on push, pull, push-dir and pull-dir | `JACCARD_NO_PROGRESS` | progress is shown |
 
 The key file is created on first use. Its endpoint ID is what the server
 records as the uploader of a pack.
@@ -178,6 +209,11 @@ ends, and a step that runs long reports every five seconds:
 uploading: 45.0%, 55.88 MiB of 124.11 MiB, 9.68 MiB/s, elapsed 6s, eta 7s
 uploading: 124.11 MiB in 2 parts (9.4s)
 ```
+
+`push-dir` and `pull-dir` show their own steps the same way, around those
+of the push and the pull: scanning the directory and importing it before,
+reading the tree and extracting it after, and cleaning up at the end. A
+step that fails keeps its mark while the temporary store is removed.
 
 The result of the command goes to standard output as before.
 `--no-progress` leaves standard error to the errors; `NO_COLOR` keeps the
