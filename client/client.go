@@ -1,5 +1,7 @@
 // Package client is the client side of jaccard-store: it pushes references
-// from a local Amber-Store Core packstore to a server and pulls them back.
+// to a server and pulls them back into a local Amber-Store Core packstore.
+// A push reads its objects from any ObjectSource, of which a packstore is
+// one.
 //
 // The client talks to the server over streams of one iroh connection
 // (package wire) and to the bucket over plain HTTP, through the pre-signed

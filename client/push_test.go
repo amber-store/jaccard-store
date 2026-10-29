@@ -1,15 +1,21 @@
 package client
 
 import (
+	"context"
+	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/amber-store/core/fstree"
 	"github.com/amber-store/core/ingest"
 	"github.com/amber-store/core/key"
 	"github.com/amber-store/core/packstore"
+	"github.com/amber-store/jaccard-store/keyset"
+	"github.com/amber-store/jaccard-store/packfile"
 )
 
 // The candidates of these tests stand for a reference of 1000 bytes.
@@ -166,5 +172,147 @@ func TestTheSizeOfAKeySetIsThatOfItsObjects(t *testing.T) {
 	// are read on the way, and the two kinds that are not.
 	if types[key.Blob] == 0 || types[key.FileNode] == 0 || types[key.DirLeaf]+types[key.DirNode] == 0 {
 		t.Fatalf("the tree lacks a kind of object this test is about: %v", types)
+	}
+}
+
+// objectMap is a source of objects that has no order of its own to read
+// them in.
+type objectMap map[key.Key][]byte
+
+func (m objectMap) Get(k key.Key) ([]byte, error) {
+	data, ok := m[k]
+	if !ok {
+		return nil, fmt.Errorf("no object %s", k)
+	}
+	return slices.Clone(data), nil
+}
+
+// backwards is a source that reads fastest in the reverse of the order it
+// is asked about, and keeps what it was asked.
+type backwards struct {
+	objectMap
+	asked [][]key.Key
+}
+
+func (b *backwards) SortByLocation(keys []key.Key) {
+	b.asked = append(b.asked, slices.Clone(keys))
+	slices.Reverse(keys)
+}
+
+// blobs returns n blobs that differ, none of them empty, and their keys in
+// the order of a key set.
+func blobs(t *testing.T, n int) (objectMap, []key.Key) {
+	t.Helper()
+	objects := objectMap{}
+	var keys []key.Key
+	for i := range n {
+		blob, err := fstree.EncodeBlob(fmt.Appendf(nil, "blob %d of %d", i, n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		objects[blob.Key] = blob.Bytes
+		keys = append(keys, blob.Key)
+	}
+	return objects, keyset.Normalize(keys)
+}
+
+// built builds a pack as a push does and returns the keys of its objects
+// in the order they lie in the data, having checked each object against
+// what the source holds.
+func built(t *testing.T, objects ObjectSource, keys []key.Key, parent *candidate) []key.Key {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "pack-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	index, err := build(context.Background(), f, objects, keys, parent, silent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	var order []key.Key
+	for o, err := range packfile.Objects(index, f) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := objects.Get(o.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(o.Data) != string(want) {
+			t.Fatalf("object %s is %q in the pack and %q in the source", o.Key, o.Data, want)
+		}
+		order = append(order, o.Key)
+	}
+	return order
+}
+
+// A source that knows where its objects lie is asked once, about the
+// objects the pack is to hold and no others, and the pack is written in
+// the order it answers.
+func TestBuildOrdersByLocationWhenTheSourceCan(t *testing.T) {
+	objects, keys := blobs(t, 6)
+	// The parent holds two of the six: the pack's own are the other four.
+	var inParent []packfile.Entry
+	var offset uint64
+	for _, k := range []key.Key{keys[1], keys[4]} {
+		length := uint32(len(objects[k]))
+		inParent = append(inParent, packfile.Entry{Key: k, Offset: offset, Length: length})
+		offset += uint64(length)
+	}
+	parentIndex, err := packfile.NewIndex(inParent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	own := []key.Key{keys[0], keys[2], keys[3], keys[5]}
+	given := slices.Clone(keys)
+
+	src := &backwards{objectMap: objects}
+	order := built(t, src, keys, &candidate{index: parentIndex})
+
+	if len(src.asked) != 1 {
+		t.Fatalf("the source was asked for its order %d times, want once", len(src.asked))
+	}
+	if !slices.Equal(src.asked[0], own) {
+		t.Fatalf("the source was asked about %v, want the pack's own keys %v", src.asked[0], own)
+	}
+	want := slices.Clone(own)
+	slices.Reverse(want)
+	if !slices.Equal(order, want) {
+		t.Fatalf("the pack holds %v, want the source's order %v", order, want)
+	}
+	if !slices.Equal(keys, given) {
+		t.Fatal("the caller's keys were put into another order")
+	}
+
+	// Without a parent the pack's own keys are all of them.
+	src = &backwards{objectMap: objects}
+	order = built(t, src, keys, nil)
+	if len(src.asked) != 1 || !slices.Equal(src.asked[0], keys) {
+		t.Fatalf("for a base pack the source was asked about %v, want every key once", src.asked)
+	}
+	want = slices.Clone(keys)
+	slices.Reverse(want)
+	if !slices.Equal(order, want) {
+		t.Fatalf("the base pack holds %v, want the source's order %v", order, want)
+	}
+}
+
+// A source that has no order of its own is read in the order of the keys
+// it is given, which a push takes from the key set.
+func TestBuildKeepsKeySetOrderOtherwise(t *testing.T) {
+	objects, keys := blobs(t, 6)
+	if order := built(t, objects, keys, nil); !slices.Equal(order, keys) {
+		t.Fatalf("the pack holds %v, want the order of the key set %v", order, keys)
+	}
+	// It is the order given that is kept, not one build works out: an
+	// index is in key order whatever the data is in.
+	given := slices.Clone(keys)
+	slices.Reverse(given)
+	if order := built(t, objects, given, nil); !slices.Equal(order, given) {
+		t.Fatalf("the pack holds %v, want the order given %v", order, given)
 	}
 }
