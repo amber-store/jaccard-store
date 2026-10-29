@@ -2,6 +2,8 @@
 // to a server and pulls them back into a local Amber-Store Core packstore.
 // A push reads its objects from any ObjectSource, of which a packstore is
 // one.
+// A reference is read without a packstore as well: Lookup names its
+// packs and Fetch hands over the objects of one.
 //
 // The client talks to the server over streams of one iroh connection
 // (package wire) and to the bucket over plain HTTP, through the pre-signed
@@ -25,8 +27,8 @@ import (
 	"github.com/amber-store/jaccard-store/wire"
 )
 
-// ErrNotFound is returned by Pull and Delete for a name the server has no
-// reference under.
+// ErrNotFound is returned by Pull, Lookup and Delete for a name the server
+// has no reference under.
 var ErrNotFound = errors.New("client: no such reference")
 
 // Opener opens one stream per request. *node.Conn and *iroh.Conn do.

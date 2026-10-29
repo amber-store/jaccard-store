@@ -3,14 +3,11 @@ package client
 import (
 	"context"
 	"fmt"
-	"io"
-	"math"
 
 	"github.com/amber-store/core/fstree"
 	"github.com/amber-store/core/key"
 	"github.com/amber-store/core/packstore"
 	"github.com/amber-store/jaccard-store/human"
-	"github.com/amber-store/jaccard-store/packfile"
 	"github.com/amber-store/jaccard-store/wire"
 )
 
@@ -44,34 +41,22 @@ type PullResult struct {
 func (c *Client) Pull(ctx context.Context, objects *packstore.Store, name string, opts PullOptions) (PullResult, error) {
 	p := progressOf(opts.Progress)
 	p.Begin("looking up the reference", 0, NoUnit)
-	resp, err := c.call(ctx, wire.Request{Op: wire.OpPull, Name: name})
-	if refused(err, wire.CodeNotFound) {
-		return PullResult{}, fmt.Errorf("%w: %q", ErrNotFound, name)
-	}
+	root, packs, err := c.lookup(ctx, name)
 	if err != nil {
 		return PullResult{}, err
-	}
-	root, err := key.Parse(resp.Root)
-	if err != nil {
-		return PullResult{}, fmt.Errorf("pull: the server's root: %w", err)
-	}
-	// A reference is read from its pack and that pack's parent, nothing
-	// else: more packs than that are not the answer to a pull.
-	if len(resp.Packs) == 0 || len(resp.Packs) > 2 {
-		return PullResult{}, fmt.Errorf("pull: the server named %d packs for %q", len(resp.Packs), name)
 	}
 	if opts.Accept != nil {
 		if err := opts.Accept(root); err != nil {
 			return PullResult{}, err
 		}
 	}
-	if len(resp.Packs) == 1 {
+	if len(packs) == 1 {
 		p.End("in one pack")
 	} else {
 		p.End("in a pack and its parent")
 	}
 	res := PullResult{Root: root}
-	for i, pack := range resp.Packs {
+	for i, pack := range packs {
 		if complete(root, objects, p) == nil {
 			return res, nil
 		}
@@ -114,40 +99,18 @@ func complete(root key.Key, objects *packstore.Store, p Progress) error {
 // is the step named step of the pull: the bytes of the index and of the
 // data are reported to p as they arrive.
 func (c *Client) importPack(ctx context.Context, objects *packstore.Store, pack wire.Pack, res *PullResult, step string, p Progress) error {
-	if pack.Objects > packfile.MaxEntries {
-		return fmt.Errorf("the server announced %d objects, more than a pack holds", pack.Objects)
+	if err := checkAnnounced(pack); err != nil {
+		return err
 	}
-	if pack.IndexSize != packfile.IndexSize(pack.Objects) {
-		return fmt.Errorf("the server announced an index of %d bytes for %d objects", pack.IndexSize, pack.Objects)
-	}
-	// No more of the data is read than it is said to be, and one byte,
-	// which a longer body gives away.
-	limit := min(pack.DataSize, math.MaxInt64-1)
-	p.Begin(step, pack.IndexSize+limit, Bytes)
-	raw, err := c.getAll(ctx, "index", pack.IndexURL, pack.IndexSize, p)
+	p.Begin(step, pack.IndexSize+dataLimit(pack), Bytes)
+	index, err := c.index(ctx, pack, p)
 	if err != nil {
 		return err
 	}
-	index, err := packfile.ParseIndex(raw)
-	if err != nil {
-		return fmt.Errorf("index: %w", err)
-	}
-	// The index decides how much is written to the store, so it is held
-	// to what the server said of the pack before any of it is.
-	if uint64(index.Len()) != pack.Objects || index.DataSize() != pack.Bytes {
-		return fmt.Errorf("index: %d objects of %d bytes, the server announced %d of %d",
-			index.Len(), index.DataSize(), pack.Objects, pack.Bytes)
-	}
-	body, err := c.get(ctx, "data", pack.DataURL)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
-	data := io.LimitReader(&meter{r: body, p: p}, int64(limit)+1)
 	written, size := 0, uint64(0)
-	for o, err := range packfile.Objects(index, data) {
+	for o, err := range c.objects(ctx, pack, index, p) {
 		if err != nil {
-			return fmt.Errorf("data: %w", orCause(ctx, err))
+			return err
 		}
 		has, err := objects.Has(o.Key)
 		if err != nil {
