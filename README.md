@@ -361,6 +361,24 @@ A pull fetches the reference's own pack, checks whether the store now holds
 everything, and fetches the parent only if it does not: a store that
 already has the parent's content never downloads it again.
 
+### From Go
+
+The commands work against a local Amber-Store Core store. A program that
+keeps its objects elsewhere uses package `client` directly:
+
+| | |
+|---|---|
+| `PushFrom(ctx, objects, name, root, opts)` | A push that reads its objects from any `ObjectSource`: a `Get(key) ([]byte, error)` that is safe for concurrent calls. `Push` is `PushFrom` with a packstore. |
+| `Lookup(ctx, name)` | The root a name points at and the `Pack`s that hold it: the reference's own pack, then its parent if it is a patch pack. Nothing is fetched. An unknown name is `ErrNotFound`. |
+| `Fetch(ctx, pack, each)` | Downloads one of those packs and hands `each` every object in the order of the pack's data, after checking it against its key. It returns the pack's index. |
+
+Objects handed over by `Fetch` back to back are the pack's uncompressed
+data at the index's offsets, so a caller can keep packs as files and read
+an object at its offset. An error that is the pack's fault wraps
+`ErrBadPack`; `StatusCode` gives the bucket's status for one that is the
+transfer's. The URLs of a `Pack` expire after the server's `--url-ttl`:
+fetch soon after the lookup.
+
 ## Limits
 
 - **Access is open.** Whoever knows the endpoint ID can push, pull, list and
