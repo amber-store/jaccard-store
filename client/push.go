@@ -60,6 +60,14 @@ type PushResult struct {
 // a patch pack against one of the base packs the server offers, if one of
 // them is fit to be its parent (see choose), and a base pack otherwise.
 func (c *Client) Push(ctx context.Context, objects *packstore.Store, name string, root key.Key, opts PushOptions) (PushResult, error) {
+	return c.PushFrom(ctx, objects, name, root, opts)
+}
+
+// PushFrom is Push for any source of objects. The objects of the pack are
+// read in the order the source prefers when it has a method
+// SortByLocation(keys []key.Key), as a packstore has, and in the order of
+// the key set otherwise.
+func (c *Client) PushFrom(ctx context.Context, objects ObjectSource, name string, root key.Key, opts PushOptions) (PushResult, error) {
 	p := progressOf(opts.Progress)
 	keys, size, err := keySet(root, objects, p)
 	if err != nil {
@@ -82,7 +90,7 @@ func (c *Client) Push(ctx context.Context, objects *packstore.Store, name string
 // The size costs no reading of its own. The walk reads every object that
 // has children, and those are measured as they pass; the others are blobs
 // and sets of extended attributes, whose keys say how long they are.
-func keySet(root key.Key, objects *packstore.Store, p Progress) (keys []key.Key, size uint64, err error) {
+func keySet(root key.Key, objects ObjectSource, p Progress) (keys []key.Key, size uint64, err error) {
 	// Only the objects with children are read, so the count that runs is
 	// of those; the step ends with the count of all.
 	p.Begin("reading the tree", 0, Objects)
@@ -187,7 +195,7 @@ func better(a, b *candidate) bool {
 	return a.bytes < b.bytes
 }
 
-func (c *Client) push(ctx context.Context, objects *packstore.Store, name string, root key.Key, keys []key.Key, size uint64, opts PushOptions) (PushResult, error) {
+func (c *Client) push(ctx context.Context, objects ObjectSource, name string, root key.Key, keys []key.Key, size uint64, opts PushOptions) (PushResult, error) {
 	p := progressOf(opts.Progress)
 	start := wire.Request{Op: wire.OpPushStart, Name: name, Root: root[:]}
 	for _, k := range sketch.Of(keys) {
@@ -376,8 +384,8 @@ func verdict(candidates []*candidate, chosen *candidate, size uint64, minDedup f
 //
 // build begins the step of packing and leaves it running: its caller ends
 // it, with the size the pack came to.
-func build(ctx context.Context, f *os.File, objects *packstore.Store, keys []key.Key, parent *candidate, p Progress) (*packfile.Index, error) {
-	// A list of its own: it is put into the store's order below, and keys
+func build(ctx context.Context, f *os.File, objects ObjectSource, keys []key.Key, parent *candidate, p Progress) (*packfile.Index, error) {
+	// A list of its own: it is put into the source's order below, and keys
 	// is the caller's.
 	var own []key.Key
 	for _, k := range keys {
@@ -390,8 +398,11 @@ func build(ctx context.Context, f *os.File, objects *packstore.Store, keys []key
 		return nil, err
 	}
 	p.Begin("packing", uint64(len(own)), Objects)
-	// The pack's order is free, so the packstore is read in its own.
-	objects.SortByLocation(own)
+	// The pack's order is free, so a source that has an order of its own,
+	// as a packstore has, is read in it; any other in that of the key set.
+	if s, ok := objects.(sorter); ok {
+		s.SortByLocation(own)
+	}
 	for _, k := range own {
 		// Reading and compressing a large reference takes minutes, and
 		// nothing else on the way looks at the context.
